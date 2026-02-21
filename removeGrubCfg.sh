@@ -1,4 +1,3 @@
-
 #!/bin/bash
 # Lab A: GRUB config removed -> boot drops to "grub>" prompt
 
