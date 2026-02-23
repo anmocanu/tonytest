@@ -1,54 +1,59 @@
 #!/bin/bash
 set -euxo pipefail
 
-###############################################
-# Lab2.sh – RHEL 10 RAW reproduction script
-# Breaks:
-#   - NIC configuration
-#   - GRUB serial console configuration
-#   - (NO initramfs removal for Lab2)
-###############################################
+LOG="/tmp/lab2.log"
+echo "[Lab2] Starting scenario reproduction..." | tee -a $LOG
 
-echo "[Lab2] Starting scenario reproduction..." | tee -a /tmp/lab2.log
+##############################################
+# 1. Detect active NetworkManager connection
+##############################################
+ACTIVE_CONN=$(nmcli -t -f NAME,DEVICE c show --active | head -n 1 | cut -d: -f1)
 
-### 1. Break NIC configuration
-echo "[Lab2] Backing up and modifying NIC config..." | tee -a /tmp/lab2.log
-NIC_NAME=$(nmcli -t -f DEVICE,STATE d | grep ':connected' | head -n1 | cut -d: -f1)
-
-if [[ -z \"$NIC_NAME\" ]]; then
-    echo \"[Lab2] ERROR: Could not detect active NIC\" | tee -a /tmp/lab2.log
+if [[ -z "$ACTIVE_CONN" ]]; then
+    echo "[Lab2] ERROR: No active NM connection detected" | tee -a $LOG
     exit 1
 fi
 
-echo \"[Lab2] Detected NIC: $NIC_NAME\" | tee -a /tmp/lab2.log
+echo "[Lab2] Active connection: $ACTIVE_CONN" | tee -a $LOG
 
-# Break the NIC configuration
-sed -i 's/^ONBOOT=.*/ONBOOT=no/' /etc/sysconfig/network-scripts/ifcfg-$NIC_NAME || true
-echo \"[Lab2] NIC config updated to ONBOOT=no\" | tee -a /tmp/lab2.log
+##############################################
+# 2. Break NIC configuration (RHEL10 RAW)
+##############################################
+echo "[Lab2] Breaking NIC configuration..." | tee -a $LOG
 
+nmcli connection modify "$ACTIVE_CONN" ipv4.method disabled
+nmcli connection down "$ACTIVE_CONN" || true
 
-### 2. Break GRUB serial console
-echo \"[Lab2] Breaking GRUB serial console...\" | tee -a /tmp/lab2.log
+echo "[Lab2] NIC disabled (ipv4.method=disabled)" | tee -a $LOG
 
-# Backup existing grub config
+##############################################
+# 3. Break GRUB serial console
+##############################################
+echo "[Lab2] Breaking GRUB serial console..." | tee -a $LOG
+
 cp -f /etc/default/grub /etc/default/grub.bak
 
-# Remove console directives
-sed -i '/console=/d' /etc/default/grub || true
+# Remove all serial console params
+sed -i 's/console=ttyS0[^ ]*//g' /etc/default/grub
+sed -i '/GRUB_TERMINAL_OUTPUT/d' /etc/default/grub
+sed -i '/GRUB_SERIAL_COMMAND/d' /etc/default/grub
 
-# Apply GRUB update (RHEL 10 uses grub2-mkconfig)
+# Rebuild GRUB config
 grub2-mkconfig -o /boot/grub2/grub.cfg
 
+echo "[Lab2] GRUB updated" | tee -a $LOG
 
-### 3. Delayed reboot via nohup job
-echo \"[Lab2] Scheduling delayed reboot...\" | tee -a /tmp/lab2.log
+##############################################
+# 4. Delayed reboot using nohup
+##############################################
+echo "[Lab2] Scheduling delayed reboot..." | tee -a $LOG
 
-nohup bash -c \"\
-    echo '[Lab2] Sleeping 30s before reboot...' >> /tmp/lab2-reboot.log 2>&1;
-    sleep 30;
-    echo '[Lab2] Rebooting now.' >> /tmp/lab2-reboot.log 2>&1;
-    shutdown -r now;
-\" &
+nohup bash -c "
+    echo '[Lab2] Sleeping 30 seconds before reboot...' >> /tmp/lab2-reboot.log 2>&1
+    sleep 30
+    echo '[Lab2] Rebooting now...' >> /tmp/lab2-reboot.log 2>&1
+    /usr/sbin/shutdown -r now
+" >/tmp/lab2-reboot.log 2>&1 &
 
-
-echo \"[Lab2] All tasks completed. System will reboot in ~30 seconds.\" | tee -a /tmp/lab2.log
+echo "[Lab2] Reboot scheduled. Exiting script cleanly." | tee -a $LOG
+exit 0
