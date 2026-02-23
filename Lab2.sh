@@ -60,7 +60,10 @@ if [ -n "$NM_CONN_FILE" ]; then
     sed -i '/^\[ipv4\]/a address1=10.10.10.10/24,10.10.10.1\ndns=168.63.129.16;' "$NM_CONN_FILE"
 fi
 
-# --- 1c. Also modify via nmcli to cover the active profile ---
+# --- 1c. Tell NetworkManager to reload profiles from disk ---
+nmcli con reload 2>/dev/null || true
+
+# --- 1d. Also modify via nmcli as backup (covers in-memory profile) ---
 CON_NAME=$(nmcli -t -f NAME con show --active 2>/dev/null | head -1)
 if [ -n "$CON_NAME" ]; then
     nmcli con mod "$CON_NAME" ipv4.method manual \
@@ -69,7 +72,7 @@ if [ -n "$CON_NAME" ]; then
         ipv4.dns "168.63.129.16" 2>/dev/null || true
 fi
 
-# --- 1d. Create legacy ifcfg-eth0 for the student to find and fix ---
+# --- 1e. Create legacy ifcfg-eth0 for the student to find and fix ---
 mkdir -p /etc/sysconfig/network-scripts
 cat > /etc/sysconfig/network-scripts/ifcfg-eth0 <<'IFCFG'
 TYPE=Ethernet
@@ -129,7 +132,19 @@ for entry in /boot/loader/entries/*.conf; do
     fi
 done
 
-# --- 2c. Regenerate grub configuration ---
+# --- 2c. Strip console=ttyS0 from grubenv kernelopts (BLS uses $kernelopts) ---
+GRUBENV="/boot/grub2/grubenv"
+if [ -f "$GRUBENV" ]; then
+    cp "$GRUBENV" "${GRUBENV}.orig.bak"
+    # grubenv is a fixed 1024-byte file; use grub2-editenv to safely modify it
+    CURRENT_OPTS=$(grub2-editenv "$GRUBENV" list 2>/dev/null | grep '^kernelopts=' | sed 's/^kernelopts=//')
+    if [ -n "$CURRENT_OPTS" ]; then
+        NEW_OPTS=$(echo "$CURRENT_OPTS" | sed 's/console=ttyS0[^ ]*//g; s/earlyprintk=ttyS0[^ ]*//g; s/  \+/ /g; s/^ //; s/ $//')
+        grub2-editenv "$GRUBENV" set "kernelopts=$NEW_OPTS"
+    fi
+fi
+
+# --- 2d. Regenerate grub configuration ---
 grub2-mkconfig -o /boot/grub2/grub.cfg
 
 ###############################################################################
