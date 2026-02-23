@@ -1,47 +1,42 @@
 #!/bin/bash
 set -euxo pipefail
 
-###############################################
-# Lab 2 – Reproduce NIC + GRUB Serial Breakage
-# RHEL 10 RAW
-###############################################
+echo "[LabA] Starting GRUB config removal..."
 
-echo "[+] Starting Lab 2 reproduction on RHEL 10..."
-
-########## 1. BREAK NETWORK CONFIG ##########
-echo "[+] Breaking network configuration..."
-
-# Remove network scripts (NetworkManager controlled)
-sudo rm -f /etc/NetworkManager/system-connections/*.nmconnection || true
-sudo rm -rf /etc/sysconfig/network-scripts || true
-
-# Optionally disable NetworkManager (forces NIC down after reboot)
-sudo systemctl disable NetworkManager || true
-
-sync
-
-########## 2. BREAK GRUB SERIAL CONSOLE ##########
-echo "[+] Breaking GRUB serial console..."
-
-# Delete console= entries from kernel cmdline
-sudo sed -i 's/console=[^ ]*//g' /etc/default/grub
-
-# Overwrite GRUB minimal config
-sudo bash -c 'cat > /etc/default/grub <<EOF
-GRUB_TIMEOUT=5
-GRUB_DISTRIBUTOR="RHEL10"
-GRUB_DISABLE_RECOVERY=true
-EOF'
-
-# Regenerate GRUB config on EFI systems
-if [ -d /boot/efi ]; then
-    sudo grub2-mkconfig -o /boot/efi/EFI/redhat/grub.cfg
+# BIOS/Gen1 path
+if [ -f /boot/grub2/grub.cfg ]; then
+    echo "[LabA] Removing /boot/grub2/grub.cfg"
+    sudo rm -f /boot/grub2/grub.cfg
 else
-    sudo grub2-mkconfig -o /boot/grub2/grub.cfg
+    echo "[LabA] /boot/grub2/grub.cfg not found (continuing)"
 fi
 
-sync
+# RHEL symlink path
+if [ -f /etc/grub2.cfg ]; then
+    echo "[LabA] Removing /etc/grub2.cfg"
+    sudo rm -f /etc/grub2.cfg
+else
+    echo "[LabA] /etc/grub2.cfg not found (continuing)"
+fi
 
-########## 3. REBOOT ##########
-echo "[+] Rebooting system to apply corruption..."
-sudo shutdown -r now
+# UEFI / Azure Gen2 path
+if [ -f /boot/efi/EFI/redhat/grub.cfg ]; then
+    echo "[LabA] Removing /boot/efi/EFI/redhat/grub.cfg"
+    sudo rm -f /boot/efi/EFI/redhat/grub.cfg
+else
+    echo "[LabA] /boot/efi/EFI/redhat/grub.cfg not found (continuing)"
+fi
+
+sudo sync
+echo "[LabA] GRUB config removed, scheduling reboot..."
+
+# Delayed reboot so the CSE reports success
+nohup bash -c "
+    echo '[LabA] Sleeping 30 seconds before reboot...' >> /tmp/labA-reboot.log 2>&1
+    sleep 30
+    echo '[LabA] Rebooting now...' >> /tmp/labA-reboot.log 2>&1
+    /usr/sbin/shutdown -r now
+" >/tmp/labA-reboot.log 2>&1 &
+
+echo "[LabA] Reboot scheduled in background. Exiting script successfully."
+exit 0
