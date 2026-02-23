@@ -18,8 +18,6 @@ backup_file() {
 }
 
 # --- 1) BREAK NETWORKING ---
-echo "[Lab2] مرحله 1: Breaking networking..."
-
 # Try legacy ifcfg path first (your lab doc uses /etc/sysconfig/network-scripts/ifcfg-eth0) [1](https://microsoft.sharepoint.com/teams/CSSLearningTeamSite/_layouts/15/Doc.aspx?sourcedoc=%7BD53EA8AB-345E-442D-B89D-390D7A6ED758%7D&file=Linux%20Advanced-Lab%202.docx&action=default&mobileredirect=true)
 IFCFG_DIR="/etc/sysconfig/network-scripts"
 if [[ -d "$IFCFG_DIR" ]] && compgen -G "$IFCFG_DIR/ifcfg-*" > /dev/null; then
