@@ -17,7 +17,7 @@ fi
 
 if [ -z "${default_kernel}" ]; then
     echo "[LabB] grubby not available or no default kernel set. Falling back to newest /boot/vmlinuz-* ..."
-    default_kernel="$(ls -1 /boot/vmlinuz-* 2>/dev/null | sort | tail -n 1 || true)"
+    default_kernel="$(ls -1 /boot/vmlinuz-* 2>/dev/null | sort -V | tail -n 1 || true)"
 fi
 
 if [ -z "${default_kernel}" ]; then
@@ -43,12 +43,15 @@ sudo sync
 echo "[LabB] Initramfs removal complete (or not found). Scheduling reboot..."
 
 # Again, schedule reboot in the background so the extension can complete cleanly.
+log_file=$(mktemp /var/log/labB-reboot.XXXXXX)
+chmod 600 "$log_file"
+
 nohup bash -c "
-    echo '[LabB] Sleeping 30s before reboot...' >> /tmp/labB-reboot.log 2>&1
+    echo '[LabB] Sleeping 30s before reboot...' >> \"$log_file\" 2>&1
     sleep 30
-    echo '[LabB] Rebooting now...' >> /tmp/labB-reboot.log 2>&1
+    echo '[LabB] Rebooting now...' >> \"$log_file\" 2>&1
     /usr/sbin/shutdown -r now
-" >/tmp/labB-reboot.log 2>&1 &
+" >>"$log_file" 2>&1 &
 
 echo "[LabB] Reboot scheduled in background. Exiting script successfully."
 exit 0
