@@ -1,0 +1,239 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "description": "LabBox child scenario(s): Lab A (missing /boot/grub2/grub.cfg) and Lab B (missing /boot/initramfs-<kernel>.img) on RHEL 10 RAW.",
+    "author": "Tony.Mocanu@microsoft.com",
+    "alias": "ANMOCANU",
+    "Enablement": "https://docs.microsoft.com/en-us/troubleshoot/azure/virtual-machines/troubleshoot-vm-boot-error",
+    "deploymentLinkInternal": "https://labboxprod.azurewebsites.net/api/Labbox?url=https://supportability.visualstudio.com/AzureIaaSVM/_git/Labbox?path=/SME/Connectivity/grub.json"
+  },
+  "parameters": {
+    "adminUsername": {
+      "type": "String",
+      "maxLength": 20,
+      "metadata": {
+        "description": "Username for the Virtual Machine."
+      }
+    },
+    "yourHomeIP": {
+      "type": "string",
+      "defaultValue": "*",
+      "metadata": {
+        "description": "Specify your IP to allow connectivity to the VM from the NSG. Do a quick search for 'my ip' and enter your IP here. This will be placed in your NSG to allow access to the labs. If left as the default value '*', the NSG will use * for the IP address. This is not recommended as CSS policy will automatically remove this rule within a few minutes for security purposes and your LabBox will then require JIT or a new rule with your IP address specified."
+      }
+    },
+    "adminPassword": {
+      "type": "SecureString",
+      "minLength": 12,
+      "metadata": {
+        "description": "Password for the Virtual Machine."
+      }
+    },
+    "location": {
+      "defaultValue": "[resourceGroup().location]",
+      "type": "String",
+      "metadata": {
+        "description": "Location for all resources."
+      }
+    },
+    "vmSize": {
+      "defaultValue": "Standard_B2ms",
+      "type": "String",
+      "metadata": {
+        "description": "Default VM Size"
+      }
+    },
+    "utcValue": {
+      "defaultValue": "[utcNow('MMddTHHmmssZ')]",
+      "type": "string",
+      "metadata": {
+        "description": "UTC value. Please ignore in order to customize resource names."
+      }
+    }
+  },
+  "variables": {
+    "nicName": "[concat('nic', parameters('utcValue'))]",
+    "addressPrefix": "10.0.0.0/16",
+    "subnetName": "[concat('subnet', parameters('utcValue'))]",
+    "subnetPrefix": "10.0.0.0/24",
+    "subnetRef": "[resourceId('Microsoft.Network/virtualNetworks/subnets', variables('virtualNetworkName'), variables('subnetName'))]",
+    "vmName": "[concat('vm', parameters('utcValue'))]",
+    "virtualNetworkName": "[concat('vnet', parameters('utcValue'))]",
+    "publicIPAddressName": "[concat('pip', parameters('utcValue'))]",
+    "networkSecurityGroupName": "[concat('nsg', parameters('utcValue'))]"
+  },
+  "resources": [
+    {
+      "type": "Microsoft.Network/publicIPAddresses",
+      "apiVersion": "2020-08-01",
+      "name": "[variables('publicIPAddressName')]",
+      "location": "[parameters('location')]",
+      "properties": {
+        "publicIPAllocationMethod": "Static"
+      },
+      "sku": {
+        "name": "Standard"
+      }
+    },
+    {
+      "type": "Microsoft.Network/networkSecurityGroups",
+      "apiVersion": "2020-08-01",
+      "name": "[variables('networkSecurityGroupName')]",
+      "location": "[parameters('location')]",
+      "properties": {
+        "securityRules": [
+          {
+            "name": "default-allow-3389",
+            "properties": {
+              "priority": 1000,
+              "access": "Allow",
+              "direction": "Inbound",
+              "destinationPortRange": "3389",
+              "protocol": "Tcp",
+              "sourceAddressPrefix": "[parameters('yourHomeIP')]",
+              "sourcePortRange": "*",
+              "destinationAddressPrefix": "*"
+            }
+          },
+          {
+            "name": "default-allow-22",
+            "properties": {
+              "priority": 1001,
+              "access": "Allow",
+              "direction": "Inbound",
+              "destinationPortRange": "22",
+              "protocol": "Tcp",
+              "sourceAddressPrefix": "[parameters('yourHomeIP')]",
+              "sourcePortRange": "*",
+              "destinationAddressPrefix": "*"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.Network/virtualNetworks",
+      "apiVersion": "2020-08-01",
+      "name": "[variables('virtualNetworkName')]",
+      "location": "[parameters('location')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.Network/networkSecurityGroups', variables('networkSecurityGroupName'))]"
+      ],
+      "properties": {
+        "addressSpace": {
+          "addressPrefixes": [
+            "[variables('addressPrefix')]"
+          ]
+        },
+        "subnets": [
+          {
+            "name": "[variables('subnetName')]",
+            "properties": {
+              "addressPrefix": "[variables('subnetPrefix')]",
+              "networkSecurityGroup": {
+                "id": "[resourceId('Microsoft.Network/networkSecurityGroups', variables('networkSecurityGroupName'))]"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.Network/networkInterfaces",
+      "apiVersion": "2020-08-01",
+      "name": "[variables('nicName')]",
+      "location": "[parameters('location')]",
+      "dependsOn": [
+        "[variables('publicIPAddressName')]",
+        "[variables('virtualNetworkName')]"
+      ],
+      "properties": {
+        "ipConfigurations": [
+          {
+            "name": "ipconfig1",
+            "properties": {
+              "privateIPAllocationMethod": "Dynamic",
+              "publicIPAddress": {
+                "id": "[resourceId('Microsoft.Network/publicIPAddresses',variables('publicIPAddressName'))]"
+              },
+              "subnet": {
+                "id": "[variables('subnetRef')]"
+              }
+            }
+          }
+        ],
+        "networkSecurityGroup": {
+          "id": "[resourceId('Microsoft.Network/networkSecurityGroups', variables('networkSecurityGroupName'))]"
+        }
+      }
+    },
+    {
+      "type": "Microsoft.Compute/virtualMachines",
+      "apiVersion": "2020-12-01",
+      "name": "[variables('vmName')]",
+      "location": "[parameters('location')]",
+      "dependsOn": [
+        "[variables('nicName')]"
+      ],
+      "properties": {
+        "hardwareProfile": {
+          "vmSize": "[parameters('vmSize')]"
+        },
+        "osProfile": {
+          "computerName": "[variables('vmName')]",
+          "adminUsername": "[parameters('adminUsername')]",
+          "adminPassword": "[parameters('adminPassword')]"
+        },
+        "storageProfile": {
+          "imageReference": {
+            "publisher": "RedHat",
+            "offer": "rhel-raw",
+            "sku": "10-raw",
+            "version": "latest"
+          },
+          "osDisk": {
+            "createOption": "FromImage",
+            "managedDisk": {
+              "storageAccountType": "StandardSSD_LRS"
+            }
+          }
+        },
+        "networkProfile": {
+          "networkInterfaces": [
+            {
+              "id": "[resourceId('Microsoft.Network/networkInterfaces',variables('nicName'))]"
+            }
+          ]
+        },
+        "diagnosticsProfile": {
+          "bootDiagnostics": {
+            "enabled": true
+          }
+        }
+      }
+    },
+    {
+      "name": "[concat(variables('vmName'), '/runLinuxScriptinCSE')]",
+      "type": "Microsoft.Compute/virtualMachines/extensions",
+      "location": "[resourceGroup().location]",
+      "apiVersion": "2019-03-01",
+      "dependsOn": [
+        "[resourceId('Microsoft.Compute/virtualMachines', variables('vmName'))]"
+      ],
+      "properties": {
+        "publisher": "Microsoft.Azure.Extensions",
+        "type": "CustomScript",
+        "typeHandlerVersion": "2.1",
+        "autoUpgradeMinorVersion": true,
+        "protectedSettings": {
+          "fileUris": [
+            "https://raw.githubusercontent.com/anmocanu/tonytest/main/Lab2.sh"
+          ],
+          "commandToExecute": "sudo bash Lab2.sh"
+        }
+      }
+    }
+  ],
+  "outputs": {}
+}
