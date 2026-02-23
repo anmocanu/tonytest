@@ -1,94 +1,91 @@
-#!/usr/bin/env bash
-set -euxo pipefail
+#!/bin/bash
+###############################################################################
+# Lab2.sh - LinuxLab302 Break Script
+# 
+# Simulates a VM migrated from on-premises to Azure without proper preparation.
+# 
+# Issues introduced:
+#   1. NIC set to static IP (breaks Azure DHCP-based connectivity)
+#   2. Serial Console not configured in GRUB (breaks Azure Serial Console)
+#
+# After this script runs and the VM reboots, the student will need to:
+#   - Use a Rescue VM to mount the broken OS disk
+#   - Change BOOTPROTO from static to dhcp in ifcfg-eth0
+#   - Configure Serial Console in /etc/default/grub
+#   - Regenerate grub.cfg with grub2-mkconfig
+###############################################################################
 
-LOG="/var/log/lab302-break.log"
-exec > >(tee -a "$LOG") 2>&1
+set -e
 
-echo "[LAB302] Starting BREAK SCRIPT..."
+###############################################################################
+# 1. Configure NIC with static IP (simulating on-premises static config)
+###############################################################################
 
-#############################################
-# 1. DISABLE CLOUD-INIT NETWORK RENDERER
-#############################################
-echo "[LAB302] Disabling cloud-init networking..."
+# Ensure the network-scripts directory exists (RHEL 10 may not have it by default)
+mkdir -p /etc/sysconfig/network-scripts
 
-mkdir -p /etc/cloud/cloud.cfg.d/
-cat > /etc/cloud/cloud.cfg.d/99-disable-network.cfg <<EOF
-network:
-  config: disabled
-EOF
+# Get the active connection name
+CON_NAME=$(nmcli -t -f NAME con show --active | head -1)
 
-chmod 644 /etc/cloud/cloud.cfg.d/99-disable-network.cfg
-sync
+# Create ifcfg-eth0 with static IP configuration (wrong IP for Azure)
+cat > /etc/sysconfig/network-scripts/ifcfg-eth0 <<'IFCFG'
+TYPE=Ethernet
+PROXY_METHOD=none
+BROWSER_ONLY=no
+BOOTPROTO=static
+DEFROUTE=yes
+IPV4_FAILURE_FATAL=no
+NAME=eth0
+DEVICE=eth0
+ONBOOT=yes
+IPADDR=10.10.10.10
+NETMASK=255.255.255.0
+GATEWAY=10.10.10.1
+DNS1=168.63.129.16
+IFCFG
 
-#############################################
-# 2. BREAK NETWORKMANAGER NIC CONFIGURATION
-#############################################
-echo "[LAB302] Breaking NetworkManager NIC config..."
-
-NM_FILE="/etc/NetworkManager/system-connections/cloud-init-eth0.nmconnection"
-
-if [[ -f "$NM_FILE" ]]; then
-    chmod 600 "$NM_FILE"  # ensure we can edit
-
-    # Overwrite IPv4 with BAD STATIC IP like in your screenshot
-    sed -i "/^\[ipv4\]/,/^\[/ s/method=.*/method=manual/" "$NM_FILE"
-    sed -i "/^\[ipv4\]/,/^\[/ s/address1=.*/address1=10.1.6.13\/24/" "$NM_FILE"
-    sed -i "/^\[ipv4\]/,/^\[/ s/gateway=.*/gateway=0.0.0.0/" "$NM_FILE"
-
-    # If address1 does not exist, append the block
-    if ! grep -q "address1=" "$NM_FILE"; then
-        cat >> "$NM_FILE" <<EOF2
-
-[ipv4]
-method=manual
-address1=10.1.6.13/24
-gateway=0.0.0.0
-EOF2
-    fi
-
-    chmod 600 "$NM_FILE"
+# Modify the active NetworkManager connection profile to use static IP
+# This changes the stored profile; takes effect on next activation/reboot
+if [ -n "$CON_NAME" ]; then
+    nmcli con mod "$CON_NAME" ipv4.method manual \
+        ipv4.addresses "10.10.10.10/24" \
+        ipv4.gateway "10.10.10.1" \
+        ipv4.dns "168.63.129.16"
 fi
 
-echo "[LAB302] Reloading and breaking active connection..."
-nmcli connection reload || true
-nmcli connection down "cloud-init-eth0" || true
-nmcli connection up "cloud-init-eth0" || true
+###############################################################################
+# 2. Remove Serial Console configuration from GRUB
+###############################################################################
 
-echo "[LAB302] NIC should now be broken."
+# Backup original grub defaults
+cp /etc/default/grub /etc/default/grub.orig.bak
 
-#############################################
-# 3. BREAK SERIAL CONSOLE (GRUB)
-#############################################
-echo "[LAB302] Breaking GRUB Serial Console..."
+# Remove serial console related parameters from GRUB_CMDLINE_LINUX
+# Removes: console=ttyS0,115200n8  earlyprintk=ttyS0,115200  earlyprintk=ttyS0
+sed -i 's/console=ttyS0[^ "]*//g' /etc/default/grub
+sed -i 's/earlyprintk=ttyS0[^ "]*//g' /etc/default/grub
 
-GRUB_DEFAULT="/etc/default/grub"
+# Clean up extra whitespace left behind in GRUB_CMDLINE_LINUX lines
+sed -i '/GRUB_CMDLINE_LINUX/s/  \+/ /g' /etc/default/grub
+sed -i '/GRUB_CMDLINE_LINUX/s/" /"/g' /etc/default/grub
+sed -i '/GRUB_CMDLINE_LINUX/s/ "/"/g' /etc/default/grub
 
-sed -i 's/console=ttyS0[^ ]*//g' "$GRUB_DEFAULT"
-sed -i 's/earlyprintk=ttyS0[^ ]*//g' "$GRUB_DEFAULT"
-sed -i '/GRUB_TERMINAL_OUTPUT/d' "$GRUB_DEFAULT"
-sed -i '/GRUB_SERIAL_COMMAND/d' "$GRUB_DEFAULT"
+# Remove serial-related GRUB directives
+sed -i '/^GRUB_TERMINAL_OUTPUT/d' /etc/default/grub
+sed -i '/^GRUB_SERIAL_COMMAND/d' /etc/default/grub
 
-sed -i '/GRUB_TERMINAL=/d' "$GRUB_DEFAULT"
-echo 'GRUB_TERMINAL="console"' >> "$GRUB_DEFAULT"
+# Set terminal output to console only (no serial)
+echo 'GRUB_TERMINAL_OUTPUT="console"' >> /etc/default/grub
 
-grub2-mkconfig -o /boot/grub2/grub.cfg || true
-sync
+# Regenerate grub configuration
+grub2-mkconfig -o /boot/grub2/grub.cfg
 
-systemctl disable serial-getty@ttyS0.service --now || true
-systemctl mask serial-getty@ttyS0.service || true
+###############################################################################
+# 3. Schedule reboot for changes to take effect
+###############################################################################
 
-#############################################
-# 4. DELAYED REBOOT (CSE SAFE)
-#############################################
-echo "[LAB302] Scheduling reboot in 40 seconds..."
+# Use nohup + sleep to allow the Custom Script Extension to report success
+# before the VM reboots with the broken configuration
+nohup bash -c 'sleep 60 && reboot' &>/dev/null &
 
-nohup bash -c "
-    echo '[LAB302] Sleeping 40 seconds before reboot...' >> /var/log/lab302-reboot.log
-    sleep 40
-    echo '[LAB302] Rebooting now...' >> /var/log/lab302-reboot.log
-    /usr/sbin/shutdown -r now
-" >/dev/null 2>&1 &
-
-echo "[LAB302] BREAK SCRIPT COMPLETE — reboot pending."
 exit 0
-``

@@ -2,7 +2,7 @@
   "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
   "contentVersion": "1.0.0.0",
   "metadata": {
-    "description": "LabBox child scenario(s): Lab A (missing /boot/grub2/grub.cfg) and Lab B (missing /boot/initramfs-<kernel>.img) on RHEL 10 RAW.",
+    "description": "LinuxLab302 - Serial Console not configured and NIC set to static IP on RHEL 10 RAW. Simulates a VM migrated from on-premises without proper Azure preparation.",
     "author": "Tony.Mocanu@microsoft.com",
     "alias": "ANMOCANU",
     "Enablement": "https://docs.microsoft.com/en-us/troubleshoot/azure/virtual-machines/troubleshoot-vm-boot-error",
