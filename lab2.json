@@ -188,8 +188,8 @@
         "storageProfile": {
           "imageReference": {
             "publisher": "RedHat",
-            "offer": "rhel-raw",
-            "sku": "10-raw",
+            "offer": "RHEL",
+            "sku": "10-lvm-gen2",
             "version": "latest"
           },
           "osDisk": {

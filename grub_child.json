@@ -6,7 +6,7 @@
     "author": "Tony.Mocanu@microsoft.com",
     "alias": "ANMOCANU",
     "Enablement": "https://docs.microsoft.com/en-us/troubleshoot/azure/virtual-machines/troubleshoot-vm-boot-error",
-    "deploymentLinkInternal": "https://labboxprod.azurewebsites.net/api/Labbox?url=https://supportability.visualstudio.com/AzureIaaSVM/_git/Labbox?path=/SME/Connectivity/grub.json"
+    "deploymentLinkInternal": "https://labboxprod.azurewebsites.net/api/Labbox?url=https://supportability.visualstudio.com/AzureIaaSVM/_git/Labbox?path=/SME/Connectivity/grub_child.json"
   },
   "parameters": {
     "adminUsername": {
@@ -199,8 +199,8 @@
         "storageProfile": {
           "imageReference": {
             "publisher": "RedHat",
-            "offer": "rhel-raw",
-            "sku": "10-raw",
+            "offer": "RHEL",
+            "sku": "10-lvm-gen2",
             "version": "latest"
           },
           "osDisk": {
