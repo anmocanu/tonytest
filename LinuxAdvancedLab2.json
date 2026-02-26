@@ -228,7 +228,7 @@
         "autoUpgradeMinorVersion": true,
         "protectedSettings": {
           "fileUris": [
-            "https://raw.githubusercontent.com/anmocanu/tonytest/main/Lab2.sh"
+            "https://raw.githubusercontent.com/anmocanu/tonytest/main/LinuxAdvancedLab2.sh"
           ],
           "commandToExecute": "sudo bash Lab2.sh"
         }
