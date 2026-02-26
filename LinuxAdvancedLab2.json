@@ -230,7 +230,7 @@
           "fileUris": [
             "https://raw.githubusercontent.com/anmocanu/tonytest/main/LinuxAdvancedLab2.sh"
           ],
-          "commandToExecute": "sudo bash Lab2.sh"
+          "commandToExecute": "sudo bash LinuxAdvancedLab2.sh"
         }
       }
     }
