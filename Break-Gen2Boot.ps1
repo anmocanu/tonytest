@@ -1,62 +1,42 @@
 <#
-  BreakGen2Boot-Wrapper.ps1
-  Purpose:
-    - Allow RunCommand to succeed immediately
-    - Asynchronously break Gen2 / UEFI boot by renaming bootmgfw.efi
-    - Reboot VM after EFI mutation
-    - Leave forensic markers on disk for debugging
-
-  Safe for LabBox / training subscriptions only
+  BreakGen2Boot.ps1 (Updated)
+  Purpose: Trigger 0x7B INACCESSIBLE_BOOT_DEVICE
+  Method: Disable Boot-Critical Storage Drivers
 #>
 
 $ErrorActionPreference = 'Stop'
-
-# --- configuration ---
-$DelaySeconds = 120
-$WorkDir      = "C:\ProgramData\LabBox"
-$PayloadPath  = "$WorkDir\BreakEFI.ps1"
+$WorkDir = "C:\LabBox"
+$LogFile = "$WorkDir\BreakStatus.txt"
 
 # --- ensure working directory ---
 New-Item -ItemType Directory -Path $WorkDir -Force | Out-Null
 
-# --- write payload to disk (NO encoding / NO base64) ---
-@"
-Start-Sleep -Seconds $DelaySeconds
+# --- Logic: Disable Storage Driver ---
+# Root Cause Analysis 5: Disabling a driver used as a lower/upper filter or critical service 
+# Root Cause Analysis 8: NVMe driver configuration issues cause 0x7B 
 
-New-Item -Path C:\LabBox -ItemType Directory -Force | Out-Null
-Set-Content -Path C:\LabBox\payload_started.txt -Value (Get-Date)
+$nvmeService = "HKLM:\SYSTEM\CurrentControlSet\Services\stornvme"
+$scsiService = "HKLM:\SYSTEM\CurrentControlSet\Services\storvsc"
 
-# Select a safe free drive letter for ESP
-`$preferredLetters = 'S','Y','Z','T','U','V','W','X'
-`$used = (Get-PSDrive -PSProvider FileSystem).Name
-`$letter = (`$preferredLetters | Where-Object { `$_ -notin `$used } | Select-Object -First 1)
-
-if (-not `$letter) {
-  Set-Content C:\LabBox\no_free_drive_letter.txt (Get-Date)
-  exit 1
+try {
+    # Attempt to disable NVMe (standard for modern Gen2 VMs)
+    if (Test-Path $nvmeService) {
+        Set-ItemProperty -Path $nvmeService -Name "Start" -Value 4
+        Add-Content -Path $LogFile -Value "stornvme disabled at $(Get-Date)"
+    } 
+    # Fallback to SCSI driver if NVMe is not present
+    elseif (Test-Path $scsiService) {
+        Set-ItemProperty -Path $scsiService -Name "Start" -Value 4
+        Add-Content -Path $LogFile -Value "storvsc disabled at $(Get-Date)"
+    }
+    else {
+        throw "No targetable storage driver found."
+    }
+}
+catch {
+    Add-Content -Path $LogFile -Value "Failed to disable driver: $($_.Exception.Message)"
+    exit 1
 }
 
-# Mount EFI System Partition
-cmd /c "mountvol `$letter`: /S" | Out-Null
-
-`$efiLoader = "`$letter`:\EFI\Microsoft\Boot\bootmgfw.efi"
-
-if (-not (Test-Path `$efiLoader)) {
-  Set-Content C:\LabBox\efi_not_found.txt `$efiLoader
-  cmd /c "mountvol `$letter`: /D" | Out-Null
-  exit 2
-}
-
-# Rename ACTIVE Gen2 bootloader
-Rename-Item -Path `$efiLoader -NewName "bootmgfw.efi.bak" -Force
-Set-Content C:\LabBox\efi_renamed.txt (Get-Date)
-
-# Dismount ESP
-cmd /c "mountvol `$letter`: /D" | Out-Null
-
-# Reboot to trigger failure
-shutdown /r /t 15 /c "LabBox: Rebooting to reproduce Gen2 UEFI boot failure"
-"@ | Set-Content -Path $PayloadPath -Encoding UTF8
-
-# --- launch payload asynchronously ---
-Start-Process -FilePath "powershell.exe" `
+# --- Reboot to trigger the BSOD ---
+shutdown /r /t 10 /f /c "LabBox: Injecting 0x7B INACCESSIBLE_BOOT_DEVICE failure"
