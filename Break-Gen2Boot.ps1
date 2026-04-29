@@ -1,42 +1,40 @@
 <#
-  BreakGen2Boot.ps1 (Updated)
-  Purpose: Trigger 0x7B INACCESSIBLE_BOOT_DEVICE
-  Method: Disable Boot-Critical Storage Drivers
+  Break-Gen2Boot.ps1
+  Purpose: 
+    - Simulate 0x7B INACCESSIBLE_BOOT_DEVICE for LabBox training.
+    - Disables critical storage and bus drivers to prevent mounting the OS disk.
+    - Targets multiple ControlSets to prevent "Last Known Good Configuration" recovery.
 #>
 
 $ErrorActionPreference = 'Stop'
-$WorkDir = "C:\LabBox"
-$LogFile = "$WorkDir\BreakStatus.txt"
 
-# --- ensure working directory ---
-New-Item -ItemType Directory -Path $WorkDir -Force | Out-Null
+# Define the critical drivers for Azure Gen2 (NVMe/SCSI) and the PCIe bus
+$Drivers = @("stornvme", "storsvc", "pci", "vmbus")
 
-# --- Logic: Disable Storage Driver ---
-# Root Cause Analysis 5: Disabling a driver used as a lower/upper filter or critical service 
-# Root Cause Analysis 8: NVMe driver configuration issues cause 0x7B 
+# We target both CurrentControlSet and ControlSet001 
+# This prevents Windows from automatically reverting to a backup configuration during boot
+$RegistryPaths = @(
+    "HKLM:\SYSTEM\CurrentControlSet\Services",
+    "HKLM:\SYSTEM\ControlSet001\Services"
+)
 
-$nvmeService = "HKLM:\SYSTEM\CurrentControlSet\Services\stornvme"
-$scsiService = "HKLM:\SYSTEM\CurrentControlSet\Services\storvsc"
-
-try {
-    # Attempt to disable NVMe (standard for modern Gen2 VMs)
-    if (Test-Path $nvmeService) {
-        Set-ItemProperty -Path $nvmeService -Name "Start" -Value 4
-        Add-Content -Path $LogFile -Value "stornvme disabled at $(Get-Date)"
-    } 
-    # Fallback to SCSI driver if NVMe is not present
-    elseif (Test-Path $scsiService) {
-        Set-ItemProperty -Path $scsiService -Name "Start" -Value 4
-        Add-Content -Path $LogFile -Value "storvsc disabled at $(Get-Date)"
-    }
-    else {
-        throw "No targetable storage driver found."
+foreach ($Path in $RegistryPaths) {
+    foreach ($Driver in $Drivers) {
+        $FullPath = "$Path\$Driver"
+        
+        if (Test-Path $FullPath) {
+            # Change 'Start' value to 4 (Disabled)
+            # 0 = Boot, 3 = Manual, 4 = Disabled
+            Set-ItemProperty -Path $FullPath -Name "Start" -Value 4 -Force
+        }
     }
 }
-catch {
-    Add-Content -Path $LogFile -Value "Failed to disable driver: $($_.Exception.Message)"
-    exit 1
-}
 
-# --- Reboot to trigger the BSOD ---
-shutdown /r /t 10 /f /c "LabBox: Injecting 0x7B INACCESSIBLE_BOOT_DEVICE failure"
+# Flush the registry to the physical disk to ensure changes survive a hard restart
+[System.GC]::Collect()
+[System.GC]::WaitForPendingFinalizers()
+
+# Force an immediate restart
+# Stop-Computer -Force is more effective in a RunCommand context than shutdown.exe
+# because it forces the kernel to halt regardless of pending updates or user sessions.
+Stop-Computer -Force
