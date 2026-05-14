@@ -1,45 +1,44 @@
 <#
-  Break-Gen2Boot.ps1
+  Break-Gen2Boot-OSBucket.ps1
   Purpose: 
-    - Reliably simulate 0x7B INACCESSIBLE_BOOT_DEVICE for LabBox training.
-    - Disables storage stack across ALL ControlSets.
-    - Wipes the CriticalDeviceDatabase for NVMe to prevent driver re-enumeration.
-    - Uses a Scheduled Task for a clean Azure deployment "Success" handshake.
+    - Simulate "OS Bucket / Boot Failure" (No Bootable Device) for Gen2 VMs.
+    - Renames the UEFI bootloader so the firmware cannot find it.
+    - Follows: https://learn.microsoft.com/en-us/troubleshoot/azure/virtual-machines/windows/os-bucket-boot-failure
 #>
 
 $ErrorActionPreference = 'Stop'
 
-# 1. Identify all ControlSets to prevent Windows from falling back to a "Last Known Good"
-$Sets = Get-ChildItem -Path HKLM:\SYSTEM -Name | Where-Object { $_ -match "ControlSet|CurrentControlSet" }
-$Drivers = @("stornvme", "storsvc", "pci", "vmbus", "atapi", "storvsc")
+# --- Payload: Mount EFI and Rename Bootloader ---
+$Payload = {
+    # 1. Find a free drive letter to mount the EFI partition
+    $usedLetters = (Get-PSDrive -PSProvider FileSystem).Name
+    $letter = ('S','Y','Z','T','U','V') | Where-Object { $_ -notin $usedLetters } | Select-Object -First 1
 
-foreach ($Set in $Sets) {
-    foreach ($Driver in $Drivers) {
-        $path = "HKLM:\SYSTEM\$Set\Services\$Driver"
-        if (Test-Path $path) {
-            # Disable driver (4) and set an invalid Group to block PnP loading
-            Set-ItemProperty -Path $path -Name "Start" -Value 4 -Force
-            Set-ItemProperty -Path $path -Name "Group" -Value "Disabled" -Force
-        }
+    # 2. Mount the EFI System Partition (ESP)
+    cmd /c "mountvol $($letter): /S"
+
+    $efiPath = "$($letter):\EFI\Microsoft\Boot\bootmgfw.efi"
+
+    if (Test-Path $efiPath) {
+        # 3. Take ownership to bypass TrustedInstaller protections
+        takeown /f $efiPath
+        icacls $efiPath /grant administrators:F
+
+        # 4. Rename the bootloader to break the boot sequence
+        Rename-Item -Path $efiPath -NewName "bootmgfw.efi.bak" -Force
     }
+
+    # 5. Force an immediate reboot to manifest the failure
+    Stop-Computer -Force
 }
 
-# 2. Wipe the CriticalDeviceDatabase entries for the storage controllers
-# This is the 'secret sauce' to ensure the kernel panics during the next boot
-$cdb = "HKLM:\SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase"
-if (Test-Path $cdb) {
-    Get-ChildItem $cdb | Where-Object { $_.Name -match "PCI#VEN_144D" -or $_.Name -match "primary_stornvme" } | Remove-Item -Recurse -Force
-}
-
-# 3. Schedule the "Self-Destruct" Reboot
-# The 1-minute delay allows the Run Command to report SUCCESS to Azure first
-$Action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument '-NoProfile -Command "Stop-Computer -Force"'
+# --- Schedule the payload to run in 60 seconds ---
+# This allows the RunCommand to report SUCCESS to Azure first.
+$ScriptBlock = "[scriptblock]::Create('$($Payload.ToString() -replace "'","''")').Invoke()"
+$Action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoProfile -Command $ScriptBlock"
 $Trigger = New-ScheduledTaskTrigger -Once -At ((Get-Date).AddMinutes(1))
 
-# Register the task to run as the SYSTEM account with highest privileges
-Register-ScheduledTask -Action $Action -Trigger $Trigger -TaskName "LabBox-Break" -User "System" -RunLevel Highest
+Register-ScheduledTask -Action $Action -Trigger $Trigger -TaskName "LabBox-OSBucket-Break" -User "System" -RunLevel Highest
 
-# 4. Final output for the Azure Run Command logs
-Write-Host "Registry and CriticalDeviceDatabase mutated successfully."
-Write-Host "Reboot scheduled in 60 seconds. VM will crash with 0x7B on next boot."
+Write-Host "Bootloader targeted. Scheduled reboot in 60s. Reporting success to Azure..."
 exit 0
