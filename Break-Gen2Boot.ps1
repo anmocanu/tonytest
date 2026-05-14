@@ -1,55 +1,38 @@
 <#
   Break-Gen2Boot-OSBucket.ps1
-  Purpose: 
-    - Reliably simulate "OS Bucket / Boot Failure" for Gen2 VMs.
-    - Forces ownership of the UEFI bootloader and renames it.
-    - Uses a Scheduled Task to avoid hanging the Azure Deployment.
+  Scenario: OS Bucket / Boot Failure (Gen2)
+  Method: Detached Process (No Scheduled Tasks)
 #>
 
 $ErrorActionPreference = 'Stop'
 
-# 1. Define the 'Nuclear' payload as a script block
-$Payload = {
-    # Find a free drive letter and mount the EFI partition
-    $usedLetters = (Get-PSDrive -PSProvider FileSystem).Name
-    $letter = ('S','Y','Z','T','U','V') | Where-Object { $_ -notin $usedLetters } | Select-Object -First 1
-    
-    cmd /c "mountvol $($letter): /S"
-    $efiFile = "$($letter):\EFI\Microsoft\Boot\bootmgfw.efi"
+# 1. Mount and Rename (The "Break")
+$usedLetters = (Get-PSDrive -PSProvider FileSystem).Name
+$letter = ('S','Y','Z','T','U','V') | Where-Object { $_ -notin $usedLetters } | Select-Object -First 1
 
-    if (Test-Path $efiFile) {
-        # FORCE ownership to the Administrators group (/a) to bypass TrustedInstaller
-        cmd /c "takeown /f $efiFile /a"
-        
-        # Grant Full Control to Administrators
-        cmd /c "icacls $efiFile /grant administrators:F /c /t"
-        
-        # Rename the bootloader to .bak to break the UEFI boot sequence
-        Move-Item -Path $efiFile -Destination "$($efiFile).bak" -Force
-        
-        # Dismount for safety
-        cmd /c "mountvol $($letter): /D"
-        
-        # Force an immediate reboot
-        Restart-Computer -Force -Confirm:$false
-    }
+Write-Host "Mounting EFI to $letter:..."
+cmd /c "mountvol $($letter): /S"
+
+$efiPath = "$($letter):\EFI\Microsoft\Boot\bootmgfw.efi"
+
+if (Test-Path $efiPath) {
+    # Take control from TrustedInstaller
+    cmd /c "takeown /f $efiPath /a"
+    cmd /c "icacls $efiPath /grant administrators:F"
+    
+    # Rename the file
+    Move-Item -Path $efiPath -Destination "$($efiPath).bak" -Force
+    Write-Host "Bootloader renamed to .bak"
+} else {
+    Write-Error "EFI path not found."
+    exit 1
 }
 
-# 2. Convert payload to a string and save it to a temporary local file
-$localScriptPath = "C:\Windows\Temp\FinalBreak.ps1"
-$Payload.ToString() | Out-File -FilePath $localScriptPath -Encoding UTF8 -Force
+# 2. The Reboot (The "Detached Hammer")
+# We launch a separate powershell process that sleeps for 10s then reboots.
+# Because it's a separate process, it survives the end of the RunCommand session.
+$rebootScript = "Start-Sleep -Seconds 10; Restart-Computer -Force"
+Start-Process powershell.exe -ArgumentList "-NoProfile -Command `"$rebootScript`""
 
-# 3. Create the Scheduled Task to run as SYSTEM with Highest Privileges
-# We set the trigger for 30 seconds from 'now' to allow Azure to finish the deployment
-$taskName = "LabBox-OSBucket-Trigger"
-$action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-ExecutionPolicy Bypass -File $localScriptPath"
-$trigger = New-ScheduledTaskTrigger -Once -At ((Get-Date).AddSeconds(30))
-$principal = New-ScheduledTaskPrincipal -UserId "NT AUTHORITY\SYSTEM" -LogonType Service -RunLevel Highest
-
-# 4. Register the task (clearing any old versions first)
-Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
-Register-ScheduledTask -Action $action -Trigger $trigger -TaskName $taskName -Principal $principal -Force
-
-Write-Host "Success: EFI Mutation task registered."
-Write-Host "The VM will rename the bootloader and reboot in 30 seconds."
+Write-Host "Reboot initiated in detached process. Reporting success to Azure..."
 exit 0
