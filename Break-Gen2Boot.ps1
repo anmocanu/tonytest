@@ -1,12 +1,12 @@
 <#
   Break-Gen2Boot-OSBucket.ps1
   Scenario: OS Bucket / Boot Failure (Gen2)
-  Method: Detached Process (No Scheduled Tasks)
+  Final Synchronous Version
 #>
 
 $ErrorActionPreference = 'Stop'
 
-# 1. Mount and Rename (The "Break")
+# 1. Mount the EFI Partition
 $usedLetters = (Get-PSDrive -PSProvider FileSystem).Name
 $letter = ('S','Y','Z','T','U','V') | Where-Object { $_ -notin $usedLetters } | Select-Object -First 1
 
@@ -15,24 +15,35 @@ cmd /c "mountvol $($letter): /S"
 
 $efiPath = "$($letter):\EFI\Microsoft\Boot\bootmgfw.efi"
 
+# 2. Force Permissions and Rename
 if (Test-Path $efiPath) {
-    # Take control from TrustedInstaller
+    Write-Host "Wresting control from TrustedInstaller..."
+    # /A gives ownership to the Administrators group
     cmd /c "takeown /f $efiPath /a"
-    cmd /c "icacls $efiPath /grant administrators:F"
+    # Grant Full control
+    cmd /c "icacls $efiPath /grant administrators:F /c"
     
-    # Rename the file
+    Write-Host "Renaming bootloader..."
+    # We use move with -Force to ensure it overwrites if needed
     Move-Item -Path $efiPath -Destination "$($efiPath).bak" -Force
-    Write-Host "Bootloader renamed to .bak"
 } else {
-    Write-Error "EFI path not found."
+    Write-Error "Bootloader not found at $efiPath"
     exit 1
 }
 
-# 2. The Reboot (The "Detached Hammer")
-# We launch a separate powershell process that sleeps for 10s then reboots.
-# Because it's a separate process, it survives the end of the RunCommand session.
-$rebootScript = "Start-Sleep -Seconds 10; Restart-Computer -Force"
-Start-Process powershell.exe -ArgumentList "-NoProfile -Command `"$rebootScript`""
+# 3. Verify Mutation locally before rebooting
+if (Test-Path "$($efiPath).bak") {
+    Write-Host "Mutation Verified. Proceeding to reboot."
+} else {
+    Write-Error "Mutation failed. File still exists as original."
+    exit 1
+}
 
-Write-Host "Reboot initiated in detached process. Reporting success to Azure..."
-exit 0
+# 4. The "Hammer" - Forced Reboot
+# We use shutdown.exe /r /f /t 5. 
+# This gives the Azure Agent 5 seconds to send 'Success' back before the OS kills the network.
+Write-Host "System will reboot in 5 seconds. Deployment might show 'Failed' but the VM will be broken."
+cmd /c "shutdown /r /f /t 5 /c `"LabBox: Simulating OS Bucket Failure`""
+
+# Sleep to ensure the script doesn't exit before the shutdown command registers
+Start-Sleep -Seconds 10
