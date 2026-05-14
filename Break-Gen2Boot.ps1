@@ -9,8 +9,6 @@ $ErrorActionPreference = 'Stop'
 Write-Host "Starting Mutation: Corrupting BCD for OS Bucket Failure..."
 
 # 1. Delete the {bootmgr} entry. 
-# Without this, UEFI knows the disk exists but doesn't know how to start Windows.
-# This results in a "No bootable device" or "BCD error" screen.
 cmd /c "bcdedit /delete {bootmgr} /f"
 
 # 2. Verify the deletion
@@ -23,10 +21,10 @@ try {
     Write-Host "Verified: Bootmgr entry is gone."
 }
 
-# 3. Forced Synchronous Reboot
-# We use /t 0 for an immediate kill so the agent can't block it.
-Write-Host "Forcing immediate reboot..."
-cmd /c "shutdown /r /f /t 0"
+# 3. Forced Synchronous Reboot with 60s Buffer
+Write-Host "Forcing reboot in 60 seconds to allow Azure status reporting..."
+cmd /c "shutdown /r /f /t 60"
 
-# Stay alive for a few seconds to ensure the kernel receives the signal
+# 4. Sleep BEFORE exiting to keep the session open for the Agent
 Start-Sleep -Seconds 5
+exit 0
