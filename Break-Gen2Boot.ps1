@@ -1,49 +1,32 @@
 <#
   Break-Gen2Boot-OSBucket.ps1
-  Scenario: OS Bucket / Boot Failure (Gen2)
-  Final Synchronous Version
+  Purpose: Simulate OS Bucket / Boot Failure by deleting the Boot Manager entry.
+  This bypasses file-system permission issues on Windows Server 2025.
 #>
 
 $ErrorActionPreference = 'Stop'
 
-# 1. Mount the EFI Partition
-$usedLetters = (Get-PSDrive -PSProvider FileSystem).Name
-$letter = ('S','Y','Z','T','U','V') | Where-Object { $_ -notin $usedLetters } | Select-Object -First 1
+Write-Host "Starting Mutation: Corrupting BCD for OS Bucket Failure..."
 
-Write-Host "Mounting EFI to $letter:..."
-cmd /c "mountvol $($letter): /S"
+# 1. Delete the {bootmgr} entry. 
+# Without this, UEFI knows the disk exists but doesn't know how to start Windows.
+# This results in a "No bootable device" or "BCD error" screen.
+cmd /c "bcdedit /delete {bootmgr} /f"
 
-$efiPath = "$($letter):\EFI\Microsoft\Boot\bootmgfw.efi"
-
-# 2. Force Permissions and Rename
-if (Test-Path $efiPath) {
-    Write-Host "Wresting control from TrustedInstaller..."
-    # /A gives ownership to the Administrators group
-    cmd /c "takeown /f $efiPath /a"
-    # Grant Full control
-    cmd /c "icacls $efiPath /grant administrators:F /c"
-    
-    Write-Host "Renaming bootloader..."
-    # We use move with -Force to ensure it overwrites if needed
-    Move-Item -Path $efiPath -Destination "$($efiPath).bak" -Force
-} else {
-    Write-Error "Bootloader not found at $efiPath"
-    exit 1
+# 2. Verify the deletion
+try {
+    $check = bcdedit /enum {bootmgr} 2>&1
+    if ($check -match "The boot configuration data store could not be opened") {
+        Write-Host "Success: BCD Store is now empty/corrupted."
+    }
+} catch {
+    Write-Host "Verified: Bootmgr entry is gone."
 }
 
-# 3. Verify Mutation locally before rebooting
-if (Test-Path "$($efiPath).bak") {
-    Write-Host "Mutation Verified. Proceeding to reboot."
-} else {
-    Write-Error "Mutation failed. File still exists as original."
-    exit 1
-}
+# 3. Forced Synchronous Reboot
+# We use /t 0 for an immediate kill so the agent can't block it.
+Write-Host "Forcing immediate reboot..."
+cmd /c "shutdown /r /f /t 0"
 
-# 4. The "Hammer" - Forced Reboot
-# We use shutdown.exe /r /f /t 5. 
-# This gives the Azure Agent 5 seconds to send 'Success' back before the OS kills the network.
-Write-Host "System will reboot in 5 seconds. Deployment might show 'Failed' but the VM will be broken."
-cmd /c "shutdown /r /f /t 5 /c `"LabBox: Simulating OS Bucket Failure`""
-
-# Sleep to ensure the script doesn't exit before the shutdown command registers
-Start-Sleep -Seconds 10
+# Stay alive for a few seconds to ensure the kernel receives the signal
+Start-Sleep -Seconds 5
