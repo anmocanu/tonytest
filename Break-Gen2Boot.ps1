@@ -1,41 +1,45 @@
 <#
   Break-Gen2Boot.ps1
   Purpose: 
-    - Simulate 0x7B INACCESSIBLE_BOOT_DEVICE for LabBox training.
-    - Disables critical storage and bus drivers.
-    - Uses a Scheduled Task to allow the Azure deployment to finish before rebooting.
+    - Reliably simulate 0x7B INACCESSIBLE_BOOT_DEVICE for LabBox training.
+    - Disables storage stack across ALL ControlSets.
+    - Wipes the CriticalDeviceDatabase for NVMe to prevent driver re-enumeration.
+    - Uses a Scheduled Task for a clean Azure deployment "Success" handshake.
 #>
 
 $ErrorActionPreference = 'Stop'
 
-# 1. Define the critical drivers for Azure Gen2 (NVMe/SCSI) and the PCIe bus 
-[cite_start]$Drivers = @("stornvme", "storsvc", "pci", "vmbus") [cite: 1]
+# 1. Identify all ControlSets to prevent Windows from falling back to a "Last Known Good"
+$Sets = Get-ChildItem -Path HKLM:\SYSTEM -Name | Where-Object { $_ -match "ControlSet|CurrentControlSet" }
+$Drivers = @("stornvme", "storsvc", "pci", "vmbus", "atapi", "storvsc")
 
-# 2. Target both CurrentControlSet and ControlSet001 to prevent automatic recovery 
-$RegistryPaths = @(
-    "HKLM:\SYSTEM\CurrentControlSet\Services",
-    "HKLM:\SYSTEM\ControlSet001\Services"
-[cite_start]) [cite: 1]
-
-foreach ($Path in $RegistryPaths) {
+foreach ($Set in $Sets) {
     foreach ($Driver in $Drivers) {
-        $FullPath = "$Path\$Driver"
-        
-        if (Test-Path $FullPath) {
-            # Change 'Start' value to 4 (Disabled) 
-            [cite_start]Set-ItemProperty -Path $FullPath -Name "Start" -Value 4 -Force [cite: 1]
+        $path = "HKLM:\SYSTEM\$Set\Services\$Driver"
+        if (Test-Path $path) {
+            # Disable driver (4) and set an invalid Group to block PnP loading
+            Set-ItemProperty -Path $path -Name "Start" -Value 4 -Force
+            Set-ItemProperty -Path $path -Name "Group" -Value "Disabled" -Force
         }
     }
 }
 
-# 3. Schedule the "Self-Destruct" Reboot 
-# This allows the script to report SUCCESS to the Azure Run Command agent first.
-[cite_start]$Action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument '-NoProfile -Command "Stop-Computer -Force"' [cite: 4]
-[cite_start]$Trigger = New-ScheduledTaskTrigger -Once -At ((Get-Date).AddMinutes(1)) [cite: 4]
+# 2. Wipe the CriticalDeviceDatabase entries for the storage controllers
+# This is the 'secret sauce' to ensure the kernel panics during the next boot
+$cdb = "HKLM:\SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase"
+if (Test-Path $cdb) {
+    Get-ChildItem $cdb | Where-Object { $_.Name -match "PCI#VEN_144D" -or $_.Name -match "primary_stornvme" } | Remove-Item -Recurse -Force
+}
 
-# Register the task to run as the SYSTEM account 
-[cite_start]Register-ScheduledTask -Action $Action -Trigger $Trigger -TaskName "LabBox-Break" -User "System" -RunLevel Highest [cite: 4]
+# 3. Schedule the "Self-Destruct" Reboot
+# The 1-minute delay allows the Run Command to report SUCCESS to Azure first
+$Action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument '-NoProfile -Command "Stop-Computer -Force"'
+$Trigger = New-ScheduledTaskTrigger -Once -At ((Get-Date).AddMinutes(1))
 
-# 4. Final log and exit 
-[cite_start]Write-Host "Registry broken. Scheduled reboot in 1 minute. Reporting success to Azure..." [cite: 4]
-[cite_start]exit 0 [cite: 4]
+# Register the task to run as the SYSTEM account with highest privileges
+Register-ScheduledTask -Action $Action -Trigger $Trigger -TaskName "LabBox-Break" -User "System" -RunLevel Highest
+
+# 4. Final output for the Azure Run Command logs
+Write-Host "Registry and CriticalDeviceDatabase mutated successfully."
+Write-Host "Reboot scheduled in 60 seconds. VM will crash with 0x7B on next boot."
+exit 0
