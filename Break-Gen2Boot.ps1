@@ -1,34 +1,37 @@
 <#
   Break-Gen2Boot-OSBucket.ps1
-  Merged Strategy: FAT32 Fix + [POWERSHELL] Encoded Background Logic
+  Strategy: Native Scheduled Task (Bypasses Agent Cleanup)
+  Matches [BAT] and [POWERSHELL] background logic principles.
 #>
 
 $ErrorActionPreference = 'Stop'
 
-# 1. Clear OOBE barrier immediately to let the Agent breathe
+# 1. Clear OOBE Barrier
 Get-Process -Name "UserOOBEBroker" -ErrorAction SilentlyContinue | Stop-Process -Force
 
-# 2. THE COMMAND STRING
-# We write the logic as a single string to ensure no variable loss.
-$cmd = {
-    Start-Sleep -Seconds 60
-    & cmd.exe /c "mountvol S: /S"
-    $efi = "S:\EFI\Microsoft\Boot\bootmgfw.efi"
-    if (Test-Path $efi) {
-        & attrib.exe -r -s -h $efi
-        Remove-Item -Path $efi -Force
-    }
-    & cmd.exe /c "mountvol S: /D"
-    Restart-Computer -Force
-}.ToString()
+# 2. CREATE THE BACKGROUND SCRIPT
+# We save the "messing things up" logic to a local file.
+$breakScript = @"
+Start-Sleep -Seconds 30
+& cmd.exe /c "mountvol S: /S"
+attrib.exe -r -s -h S:\\EFI\\Microsoft\\Boot\\bootmgfw.efi
+Remove-Item -Path S:\\EFI\\Microsoft\\Boot\\bootmgfw.efi -Force
+& cmd.exe /c "mountvol S: /D"
+Restart-Computer -Force
+"@
+$scriptPath = "C:\Windows\Temp\FinalBreak.ps1"
+Set-Content -Path $scriptPath -Value $breakScript
 
-# Encode to Base64 to bypass any string parsing issues in the new process
-$bytes = [System.Text.Encoding]::Unicode.GetBytes($cmd)
-$encoded = [Convert]::ToBase64String($bytes)
+# 3. REGISTER THE TASK (The "Time Bomb")
+# This runs as SYSTEM and triggers 1 minute from now.
+$action = New-ScheduledTaskAction -Execute "PowerShell.exe" -Argument "-NoProfile -ExecutionPolicy Bypass -File $scriptPath"
+$trigger = New-ScheduledTaskTrigger -Once -At ((Get-Date).AddMinutes(1))
+$principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -RunLevel Highest
 
-# 3. THE TRIGGER
-# Launch as a completely detached process using the EncodedCommand switch
-Write-Output "Background process launched. Reporting success to Azure..."
-Start-Process powershell.exe -ArgumentList "-NoProfile", "-EncodedCommand", $encoded
+Register-ScheduledTask -TaskName "AzureLabBreak" -Action $action -Trigger $trigger -Principal $principal -Force
 
+Write-Output "Background process scheduled via Task Scheduler. Reporting success to Azure..."
+
+# 4. EXIT IMMEDIATELY
+# The portal turns green, and the Task Scheduler handles the rest.
 exit 0
