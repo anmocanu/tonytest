@@ -1,6 +1,6 @@
 <#
   Break-Gen2Boot-OSBucket.ps1
-  Method: Native PowerShell Scheduled Task
+  Method: Registry RunOnce + Immediate Threaded Shutdown
   Goal: Success in Portal + Gen2 "No bootable device" error
 #>
 
@@ -22,17 +22,14 @@ if (Test-Path $efiFile) {
 
 mountvol "$($letter):" /D
 
-# 2. Create the Scheduled Task using Native Cmdlets
-# This avoids the "cmd /c" pathing issues.
-$taskName = "LabReboot"
-$action = New-ScheduledTaskAction -Execute "shutdown.exe" -Argument "/r /f /t 0"
-# Set trigger for 1 minute from now
-$trigger = New-ScheduledTaskTrigger -Once -At ((Get-Date).AddMinutes(1))
-# Run as SYSTEM for highest privilege
-$principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType Service -RunLevel Highest
+# 2. Use the 'RunOnce' Registry Key as a backup trigger
+$registryPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce"
+Set-ItemProperty -Path $registryPath -Name "LabBreak" -Value "shutdown.exe /r /f /t 0"
 
-Write-Host "Registering the scheduled task..."
-Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Principal $principal
+# 3. The "Suicide" command with a tiny delay
+# This uses a background job that is detached enough to let the script finish.
+Write-Host "Triggering delayed reboot via background job..."
+Start-Job -ScriptBlock { Start-Sleep -Seconds 10; shutdown.exe /r /f /t 0 }
 
-Write-Host "Task registered. Reporting success to Azure. VM reboots in 60s."
+Write-Host "Reporting success to Azure. VM will reboot shortly."
 exit 0
