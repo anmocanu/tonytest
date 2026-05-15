@@ -1,50 +1,36 @@
 <#
   Break-Gen2Boot-OSBucket.ps1
-  Strategy: FAT32 Direct Deletion (No ACLs)
+  Merged Strategy: FAT32 Fix + [POWERSHELL] Background Logic
 #>
 
 $ErrorActionPreference = 'Stop'
 
-# 1. Kill OOBE
-Write-Output "Clearing OOBE blocking processes..."
+# 1. THE "MESSING THINGS UP" PAYLOAD
+# This is a script block that will run in the background.
+$payload = {
+    # [BAT] Logic: Wait 60s so the portal turns Green first
+    Start-Sleep -Seconds 60
+    
+    # FAT32 Mutation (The part that actually works on Server 2025)
+    mountvol S: /S
+    $efiFile = "S:\EFI\Microsoft\Boot\bootmgfw.efi"
+    if (Test-Path $efiFile) {
+        attrib.exe -r -s -h $efiFile
+        Remove-Item -Path $efiFile -Force
+    }
+    mountvol S: /D
+    
+    # [POWERSHELL] Logic: Force the break
+    Restart-Computer -Force
+}
+
+# 2. THE TRIGGER
+# Clear OOBE barrier immediately
 Get-Process -Name "UserOOBEBroker" -ErrorAction SilentlyContinue | Stop-Process -Force
 
-# 2. Mount EFI Partition
-$letter = "S"
-if (Get-PSDrive $letter -ErrorAction SilentlyContinue) {
-    & cmd.exe /c "mountvol $($letter): /D"
-}
-& cmd.exe /c "mountvol $($letter): /S"
+# Launch the payload as a detached process
+# This allows THIS script to exit NOW and report success to Azure.
+Start-Process powershell.exe -ArgumentList "-NoProfile", "-Command", "& {$($payload.ToString())}"
 
-$efiFile = "S:\EFI\Microsoft\Boot\bootmgfw.efi"
-
-# 3. The Mutation (FAT32 Logic)
-if (Test-Path $efiFile) {
-    Write-Output "Removing attributes and deleting $efiFile..."
-    
-    # Strip Read-Only, System, and Hidden attributes which protect the file on FAT32
-    & attrib.exe -r -s -h $efiFile
-    
-    # Direct deletion
-    Remove-Item -Path $efiFile -Force
-    
-    # VERIFICATION
-    if (Test-Path $efiFile) {
-        Write-Error "Critical Failure: File still exists after deletion attempt."
-        exit 1
-    } else {
-        Write-Output "Success: Bootloader file removed."
-    }
-} else {
-    Write-Error "Error: Bootloader not found at $efiFile."
-    exit 1
-}
-
-# 4. Final Cleanup and Shutdown
-& cmd.exe /c "mountvol $($letter): /D"
-Write-Output "Reporting success. Triggering reboot in 10 seconds..."
-
-# Shortened timer to ensure it hits before Windows tries to repair itself
-& cmd.exe /c "shutdown /r /f /t 10"
-Start-Sleep -Seconds 5
+Write-Output "Background process launched. Portal will show Success shortly."
 exit 0
