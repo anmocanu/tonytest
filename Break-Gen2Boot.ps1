@@ -1,47 +1,41 @@
 <#
   Break-Gen2Boot-OSBucket.ps1
   Scenario: OS Bucket / Boot Failure (Gen2)
-  Strategy: Settlement Delay (to clear OOBE) + Synchronous Mutation
+  Strategy: Kill OOBE + Direct File Deletion + Synchronous Reboot
 #>
 
 $ErrorActionPreference = 'Stop'
 
-# 1. SETTLEMENT DELAY 
-# Windows Server 2025 needs time to clear the 'Diagnostic Data' and OOBE screens.
-Write-Output "Waiting 180 seconds for OOBE and Guest Agent stabilization..."
-Start-Sleep -Seconds 180
+# 1. Force-kill the OOBE process to clear the 'Diagnostic Data' screen barrier
+Write-Output "Clearing OOBE blocking processes..."
+Get-Process -Name "UserOOBEBroker" -ErrorAction SilentlyContinue | Stop-Process -Force
 
 # 2. Mount EFI Partition
-Write-Output "Mounting EFI Partition..."
-$usedLetters = (Get-PSDrive -PSProvider FileSystem).Name
-$letter = ('S','Y','Z','T','U','V') | Where-Object { $_ -notin $usedLetters } | Select-Object -First 1
+$letter = "S"
+if (Get-PSDrive $letter -ErrorAction SilentlyContinue) {
+    & cmd.exe /c "mountvol $($letter): /D"
+}
 & cmd.exe /c "mountvol $($letter): /S"
 
-$efiFile = "$($letter):\EFI\Microsoft\Boot\bootmgfw.efi"
+$efiFile = "S:\EFI\Microsoft\Boot\bootmgfw.efi"
 
-# 3. The Mutation (Gen1 Symmetry)
+# 3. The Mutation
 if (Test-Path $efiFile) {
-    Write-Output "Taking ownership and deleting bootloader..."
+    Write-Output "Applying mutation to $efiFile..."
     & cmd.exe /c "takeown /f $efiFile /a"
     & cmd.exe /c "icacls $efiFile /grant administrators:F /c"
     Remove-Item -Path $efiFile -Force
     Write-Output "Success: Bootloader file removed."
-}
-else {
-    Write-Error "Error: Bootloader file not found at $efiFile."
+} else {
+    Write-Error "Error: Bootloader not found at $efiFile."
     exit 1
 }
 
-# 4. Cleanup and Shutdown
+# 4. Final Cleanup and Shutdown
 & cmd.exe /c "mountvol $($letter): /D"
+Write-Output "Reporting success. Triggering reboot in 30 seconds..."
 
-Write-Output "Mutation complete. Reporting SUCCESS to Azure Portal."
-Write-Output "The VM will reboot into the 'No bootable device' error in 30 seconds."
-
-# Using a synchronous shutdown with a wait to ensure the Agent reports status first.
+# Synchronous reboot call
 & cmd.exe /c "shutdown /r /f /t 30"
-
-# Keep the session open for 15 seconds to let the Agent flush logs
 Start-Sleep -Seconds 15
-
 exit 0
