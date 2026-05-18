@@ -2,7 +2,7 @@
   Break-Gen2Boot-0xC0000001.ps1
   Purpose: 
     - Reliably simulate 0xC0000001 (STATUS_UNSUCCESSFUL) for training labs.
-    - Surgically breaks the ntoskrnl.exe integrity to trigger signature validation failure.
+    - Surgically breaks digital signature validity without corrupting PE image headers.
     - Uses an out-of-process Scheduled Task for a clean Azure "Success" handshake.
 #>
 
@@ -11,22 +11,24 @@ $ErrorActionPreference = 'Stop'
 # 1. Clear OOBE Barrier immediately so the Guest Agent can execute without blocks
 Get-Process -Name "UserOOBEBroker" -ErrorAction SilentlyContinue | Stop-Process -Force
 
-# 2. DEFINE THE IN-MEMORY DESTRUCTION PAYLOAD
+# 2. DEFINE THE BACKGROUND MUTATION PAYLOAD
 $breakScript = @'
 Start-Sleep -Seconds 30
 
-$kernelPath = "C:\Windows\System32\ntoskrnl.exe"
+# Target a critical boot-start driver instead of the main kernel execution binary
+$driverPath = "C:\Windows\System32\drivers\acpi.sys"
 
-if (Test-Path $kernelPath) {
-    # Take ownership and grant Full Control to modify the kernel binary on disk
-    & cmd.exe /c "takeown /f $kernelPath /a"
-    & cmd.exe /c "icacls $kernelPath /grant administrators:F /c"
-    & cmd.exe /c "attrib -r -s -h $kernelPath"
+if (Test-Path $driverPath) {
+    # Take ownership and grant Full Control to modify the file
+    & cmd.exe /c "takeown /f $driverPath /a"
+    & cmd.exe /c "icacls $driverPath /grant administrators:F /c"
+    & cmd.exe /c "attrib -r -s -h $driverPath"
     
-    # Intentionally corrupt the binary structure by overwriting the first few bytes
-    # This renders the signature invalid and corrupts the PE header execution path
-    [byte[]]$corruptBytes = 0x41, 0x42, 0x43, 0x44, 0x45, 0x46
-    $stream = [System.IO.File]::OpenWrite($kernelPath)
+    # Append corruption bytes directly to the END of the file.
+    # This leaves the PE file headers intact (avoiding 0xc000007b) 
+    # but completely breaks the cryptographic checksum / digital signature.
+    [byte[]]$corruptBytes = 0x99, 0x99, 0x99, 0x99
+    $stream = [System.IO.File]::Open($driverPath, [System.IO.FileMode]::Append, [System.IO.FileAccess]::Write)
     $stream.Write($corruptBytes, 0, $corruptBytes.Length)
     $stream.Close()
 }
@@ -47,6 +49,6 @@ $principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -RunLevel Highest
 Register-ScheduledTask -TaskName "AzureKernelBreak" -Action $action -Trigger $trigger -Principal $principal -Force
 
 # 5. Output confirmation strings for the Azure Run Command logs
-Write-Host "Kernel target routine structured successfully."
-Write-Host "Background deployment scheduled. VM will halt with 0xC0000001 on the subsequent boot phase."
+Write-Host "Driver integrity modification routine structured successfully."
+Write-Host "Background deployment scheduled. VM will halt with 0xC0000001 on next boot phase."
 exit 0
