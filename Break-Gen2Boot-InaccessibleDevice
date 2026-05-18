@@ -1,45 +1,45 @@
 <#
-  Break-Gen2Boot-InaccessibleDevice.ps1
-  Scenario: Kernel Panic / INACCESSIBLE_BOOT_DEVICE BSOD (Gen 2)
-  Strategy: Asynchronous Storage Driver Disablement via Offline Registry Hive
+  Break-Gen2Boot.ps1
+  Purpose: 
+    - Reliably simulate 0x7B INACCESSIBLE_BOOT_DEVICE for LabBox training.
+    - Disables storage stack across ALL ControlSets.
+    - Wipes the CriticalDeviceDatabase for NVMe to prevent driver re-enumeration.
+    - Uses a Scheduled Task for a clean Azure deployment "Success" handshake.
 #>
 
 $ErrorActionPreference = 'Stop'
 
-# 1. Clear OOBE Barrier immediately
-Get-Process -Name "UserOOBEBroker" -ErrorAction SilentlyContinue | Stop-Process -Force
+# 1. Identify all ControlSets to prevent Windows from falling back to a "Last Known Good"
+$Sets = Get-ChildItem -Path HKLM:\SYSTEM -Name | Where-Object { $_ -match "ControlSet|CurrentControlSet" }
+$Drivers = @("stornvme", "storsvc", "pci", "vmbus", "atapi", "storvsc")
 
-# 2. DEFINE THE REGISTRY MUTATION PAYLOAD
-$breakScript = @"
-Start-Sleep -Seconds 60
+foreach ($Set in $Sets) {
+    foreach ($Driver in $Drivers) {
+        $path = "HKLM:\SYSTEM\$Set\Services\$Driver"
+        if (Test-Path $path) {
+            # Disable driver (4) and set an invalid Group to block PnP loading
+            Set-ItemProperty -Path $path -Name "Start" -Value 4 -Force
+            Set-ItemProperty -Path $path -Name "Group" -Value "Disabled" -Force
+        }
+    }
+}
 
-# Mount the SYSTEM registry hive to modify boot drivers out-of-process
-reg.exe load HKLM\OFFLINE_SYSTEM C:\Windows\System32\config\SYSTEM
+# 2. Wipe the CriticalDeviceDatabase entries for the storage controllers
+# This is the 'secret sauce' to ensure the kernel panics during the next boot
+$cdb = "HKLM:\SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase"
+if (Test-Path $cdb) {
+    Get-ChildItem $cdb | Where-Object { $_.Name -match "PCI#VEN_144D" -or $_.Name -match "primary_stornvme" } | Remove-Item -Recurse -Force
+}
 
-# Disable core virtual storage and cloud block storage initialization drivers
-# Setting 'Start' to 4 completely disables the driver from loading during boot.
-reg.exe add "HKLM\OFFLINE_SYSTEM\ControlSet001\Services\stornvme" /v Start /t REG_DWORD /d 4 /f
-reg.exe add "HKLM\OFFLINE_SYSTEM\ControlSet001\Services\storvsc" /v Start /t REG_DWORD /d 4 /f
-reg.exe add "HKLM\OFFLINE_SYSTEM\ControlSet001\Services\vhdmp" /v Start /t REG_DWORD /d 4 /f
-reg.exe add "HKLM\OFFLINE_SYSTEM\ControlSet001\Services\spaceport" /v Start /t REG_DWORD /d 4 /f
+# 3. Schedule the "Self-Destruct" Reboot
+# The 1-minute delay allows the Run Command to report SUCCESS to Azure first
+$Action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument '-NoProfile -Command "Stop-Computer -Force"'
+$Trigger = New-ScheduledTaskTrigger -Once -At ((Get-Date).AddMinutes(1))
 
-# Unmount the hive cleanly so it commits to disk
-reg.exe unload HKLM\OFFLINE_SYSTEM
+# Register the task to run as the SYSTEM account with highest privileges
+Register-ScheduledTask -Action $Action -Trigger $Trigger -TaskName "LabBox-Break" -User "System" -RunLevel Highest
 
-# Force a violent reboot
-& cmd.exe /c "shutdown /r /f /t 5"
-"@
-
-# 3. SAVE PAYLOAD TO LOCAL DISK
-$scriptPath = "C:\Windows\Temp\StorageMutation.ps1"
-Set-Content -Path $scriptPath -Value $breakScript
-
-# 4. REGISTER THE BACKGROUND TASK
-$action = New-ScheduledTaskAction -Execute "PowerShell.exe" -Argument "-NoProfile -ExecutionPolicy Bypass -File $scriptPath"
-$trigger = New-ScheduledTaskTrigger -Once -At ((Get-Date).AddMinutes(1))
-$principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -RunLevel Highest
-
-Register-ScheduledTask -TaskName "AzureStorageBreak" -Action $action -Trigger $trigger -Principal $principal -Force
-
-Write-Output "Asynchronous storage mutation scheduled. Reporting success to Azure..."
+# 4. Final output for the Azure Run Command logs
+Write-Host "Registry and CriticalDeviceDatabase mutated successfully."
+Write-Host "Reboot scheduled in 60 seconds. VM will crash with 0x7B on next boot."
 exit 0
