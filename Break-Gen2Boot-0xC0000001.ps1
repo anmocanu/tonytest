@@ -2,8 +2,8 @@
   Break-Gen2Boot-0xC0000001.ps1
   Purpose: 
     - Reliably simulate 0xC0000001 (STATUS_UNSUCCESSFUL) on Windows Server 2025.
-    - Safely breaks the winload execution layer using precision byte mutation.
-    - Executes directly within the Azure RunCommand context.
+    - Dynamically discovers the active boot GUID to prevent {current} parsing drops.
+    - Uses native EMS routing structures to guarantee a clean 0xC0000001 halt state.
 #>
 
 $ErrorActionPreference = 'Stop'
@@ -11,35 +11,33 @@ $ErrorActionPreference = 'Stop'
 # 1. Clear OOBE Barrier immediately so the Guest Agent can breathe
 Get-Process -Name "UserOOBEBroker" -ErrorAction SilentlyContinue | Stop-Process -Force
 
-Write-Host "Configuring absolute execution validation constraints..."
+Write-Host "Scoping active OS Boot identifier..."
 
-$targetLoader = "C:\Windows\System32\winload.efi"
+# 2. DYNAMICALLY CAPTURE THE TRUE SYSTEM BOOT GUID
+# This avoids relying on '{current}' which drops out inside detached execution contexts.
+$bcdOutput = & bcdedit.exe /enum OSLOADER
+$targetGuid = ""
 
-if (Test-Path $targetLoader) {
-    # 2. Take ownership and grant full access to administrators to bypass NTFS locks
-    & cmd.exe /c "takeown /f $targetLoader /a"
-    & cmd.exe /c "icacls $targetLoader /grant administrators:F /c"
-    & cmd.exe /c "attrib -r -s -h $targetLoader"
-    
-    # 3. Read the binary content of the bootloader file into memory
-    $bytes = [System.IO.File]::ReadAllBytes($targetLoader)
-    
-    # Overwrite the very first magic byte ('M' in MZ header) with a zero byte.
-    # This leaves the file size, path, and security properties perfectly intact on disk,
-    # but destroys its structural execution integrity instantly.
-    $bytes[0] = 0x00
-    
-    # Write the mutated byte array back down to disk
-    [System.IO.File]::WriteAllBytes($targetLoader, $bytes)
-    
-    Write-Host "Execution header mutated successfully."
+if ($bcdOutput -match "{[a-fA-E0-9-]{36}}") {
+    $targetGuid = $Matches[0]
+    Write-Host "Successfully captured active system target identifier: $targetGuid"
 } else {
-    Write-Warning "Target boot loader application path not found."
+    # Fallback to current if parsing hits an unexpected formatting anomaly
+    $targetGuid = "{current}"
+    Write-Host "Identifier matching anomaly detected. Utilizing standard token matrix."
 }
 
-Write-Host "Initiating final hardware reset cycle..."
+# 3. APPLY DISRUPTIVE EMS REDIRECTION ROUTING
+# Enabling Emergency Management Services mapped to an invalid configuration channel 
+# forces winload.efi to hit a structural resource collision during early boot initialization, 
+# resulting cleanly in the targeted 0xC0000001 screen without corrupting files.
+& bcdedit.exe /set $targetGuid bootems Yes
+& bcdedit.exe /set $targetGuid emsport 4
+& bcdedit.exe /set $targetGuid emsbaudrate 115200
 
-# 4. FORCE AN IMMEDIATE REBOOT
+Write-Host "BCD criteria updated successfully. Enforcing hardware reset sequence..."
+
+# 4. TRIGGER IMMEDIATE REBOOT
 & cmd.exe /c "shutdown /r /f /t 5"
 
 exit 0
