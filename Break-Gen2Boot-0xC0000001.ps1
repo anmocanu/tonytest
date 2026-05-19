@@ -2,8 +2,8 @@
   Break-Gen2Boot-0xC0000001.ps1
   Purpose: 
     - Reliably simulate 0xC0000001 (STATUS_UNSUCCESSFUL) on Windows Server 2025.
-    - Directly targets BCD application paths to force an absolute winload halt phase.
-    - Bypasses background task failures by executing immediately.
+    - Diverts the winload application path to force an absolute boot manager halt phase.
+    - Executes directly within the Azure RunCommand context.
 #>
 
 $ErrorActionPreference = 'Stop'
@@ -13,17 +13,17 @@ Get-Process -Name "UserOOBEBroker" -ErrorAction SilentlyContinue | Stop-Process 
 
 Write-Host "Configuring absolute BCD validation constraints..."
 
-# 2. FORCE BCD TO AN INVALID OS DEVICE PATH
-# By changing the path mapping of the current boot loader entry, winload.efi
-# cannot initialize its execution environment, guaranteeing a clean 0xC0000001 status halt.
-& bcdedit.exe /set {current} osdevice "ramdisk=[unknown]\DoesNotExist"
-& bcdedit.exe /set {current} systemroot "\WindowsDoesNotExist"
+# 2. ALTER THE BOOTLOADER PATH PARAMETER
+# This is syntactically valid for bcdedit, bypassing the parameter validation check,
+# but forces a fatal 0xC0000001 resolution error on the subsequent boot phase.
+& bcdedit.exe /set {current} path "\Windows\System32\winload_doesnotexist.efi"
 
-# 3. Output confirmation strings for the Azure logs BEFORE the reboot drops the agent
-Write-Host "BCD changes applied successfully. Issuing hardware reset execution loop..."
+Write-Host "BCD changes applied successfully. Clearing pre-scheduled loops and issuing reset..."
 
-# 4. Trigger the reboot immediately
-# Using a 10-second delay ensures the Custom Script Extension finishes sending its success log back to Azure.
+# 3. ABORT ANY EXISTING SHUTDOWN WINDOWS AND FORCE REBOOT
+# /a clears error 1190 conflicts; /r /f /t 10 guarantees execution and logs delivery.
+& cmd.exe /c "shutdown /a"
+Start-Sleep -Seconds 2
 & cmd.exe /c "shutdown /r /f /t 10"
 
 exit 0
