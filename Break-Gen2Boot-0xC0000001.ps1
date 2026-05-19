@@ -1,8 +1,8 @@
 <#
   Break-Gen2Boot-0xC0000001.ps1
   Purpose: 
-    - Reliably simulate 0xC0000001 (STATUS_UNSUCCESSFUL) on fresh Gen 2 VMs.
-    - Targets a non-storage critical service to ensure clean error display.
+    - Reliably simulate 0xC0000001 (STATUS_UNSUCCESSFUL) on modern Gen 2 VMs.
+    - Moves Code Integrity library to force an absolute winload halt phase.
     - Uses an out-of-process Scheduled Task for a clean Azure "Success" handshake.
 #>
 
@@ -15,17 +15,26 @@ Get-Process -Name "UserOOBEBroker" -ErrorAction SilentlyContinue | Stop-Process 
 $breakScript = @'
 Start-Sleep -Seconds 60
 
-# Target the Special Administration Console driver (sacdrv)
-# This is a boot-start service. Breaking its path allows the storage stack to remain intact,
-# forcing winload to cleanly present the 0xC0000001 error screen rather than a storage crash.
-Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\sacdrv" -Name "ImagePath" -Value "System32\drivers\doesnotexist.sys" -Force
+$targetFile = "C:\Windows\System32\CI.dll"
+
+if (Test-Path $targetFile) {
+    # Grant permissions to administrators over Code Integrity binary
+    & cmd.exe /c "takeown /f $targetFile /a"
+    & cmd.exe /c "icacls $targetFile /grant administrators:F /c"
+    & cmd.exe /c "attrib -r -s -h $targetFile"
+    
+    # Rename the file instead of deleting it. 
+    # This leaves the image intact for potential lab rescue scenarios, 
+    # but winload.efi will immediately fail to resolve the dependency.
+    Rename-Item -Path $targetFile -NewName "CI.dll.bak" -Force
+}
 
 # Force a rapid, violent reboot via command-line execution
 & cmd.exe /c "shutdown /r /f /t 5"
 '@
 
 # 3. SAVE PAYLOAD TO LOCAL TEMPORARY PATH
-$scriptPath = "C:\Windows\Temp\NativeMutation.ps1"
+$scriptPath = "C:\Windows\Temp\CiMutation.ps1"
 Set-Content -Path $scriptPath -Value $breakScript
 
 # 4. REGISTER THE BACKGROUND TASK (The Independent Time Bomb)
@@ -36,6 +45,6 @@ $principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -RunLevel Highest
 Register-ScheduledTask -TaskName "AzureNativeGenericBreak" -Action $action -Trigger $trigger -Principal $principal -Force
 
 # 5. Output confirmation strings and exit cleanly
-Write-Host "Non-storage service target structured successfully."
+Write-Host "Code Integrity constraint structured successfully."
 Write-Host "Background deployment scheduled. VM will transition to 0xC0000001 shortly."
 exit 0
