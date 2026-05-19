@@ -2,7 +2,7 @@
   Break-Gen2Boot-0xC0000001.ps1
   Purpose: 
     - Reliably simulate 0xC0000001 (STATUS_UNSUCCESSFUL) on Windows Server 2025.
-    - Injects a strict security initialization constraint to bypass self-healing filters.
+    - Safely breaks the winload execution layer using precision byte mutation.
     - Executes directly within the Azure RunCommand context.
 #>
 
@@ -11,17 +11,35 @@ $ErrorActionPreference = 'Stop'
 # 1. Clear OOBE Barrier immediately so the Guest Agent can breathe
 Get-Process -Name "UserOOBEBroker" -ErrorAction SilentlyContinue | Stop-Process -Force
 
-Write-Host "Configuring system initialization constraints..."
+Write-Host "Configuring absolute execution validation constraints..."
 
-# 2. FORCE LSA SYSTEM AUDIT STATE FAILURE
-# This creates a native security policy restriction. During winload/kernel handoff, 
-# the system reads this flag and terminates initialization immediately, yielding 0xC0000001.
-$registryPath = "HKLM:\SYSTEM\CurrentControlSet\Control\Lsa"
-Set-ItemProperty -Path $registryPath -Name "crashonauditfail" -Value 2 -Type DWord -Force
+$targetLoader = "C:\Windows\System32\winload.efi"
 
-Write-Host "Configuration completed successfully. Issuing immediate hardware reset..."
+if (Test-Path $targetLoader) {
+    # 2. Take ownership and grant full access to administrators to bypass NTFS locks
+    & cmd.exe /c "takeown /f $targetLoader /a"
+    & cmd.exe /c "icacls $targetLoader /grant administrators:F /c"
+    & cmd.exe /c "attrib -r -s -h $targetLoader"
+    
+    # 3. Read the binary content of the bootloader file into memory
+    $bytes = [System.IO.File]::ReadAllBytes($targetLoader)
+    
+    # Overwrite the very first magic byte ('M' in MZ header) with a zero byte.
+    # This leaves the file size, path, and security properties perfectly intact on disk,
+    # but destroys its structural execution integrity instantly.
+    $bytes[0] = 0x00
+    
+    # Write the mutated byte array back down to disk
+    [System.IO.File]::WriteAllBytes($targetLoader, $bytes)
+    
+    Write-Host "Execution header mutated successfully."
+} else {
+    Write-Warning "Target boot loader application path not found."
+}
 
-# 3. FORCE IMMEDIATE REBOOT
+Write-Host "Initiating final hardware reset cycle..."
+
+# 4. FORCE AN IMMEDIATE REBOOT
 & cmd.exe /c "shutdown /r /f /t 5"
 
 exit 0
