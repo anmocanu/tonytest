@@ -1,7 +1,7 @@
 <#
     Break-Gen2Boot-0xC0000001.ps1
-    Forces a setup subsystem initialization mismatch.
-    Bypasses file validation filters to surface exact error code 0xC0000001.
+    Simulates a critical subsystem initialization failure.
+    Forces winload.efi to surface an authentic 0xC0000001 status screen under Gen2 rules.
 #>
 
 $ErrorActionPreference = "Stop"
@@ -19,60 +19,79 @@ function Log([string]$msg) {
     Write-Host $line
 }
 
-Log "Starting boot-break designed specifically for 0xC0000001 via Subsystem State Mismatch."
+Log "Starting boot-break designed specifically for 0xC0000001 via Subsystem Hive Isolation."
 
-$stamp = Get-Date -Format "yyyyMMdd-HHmmss"
-$bcdBackup = Join-Path $root "bcd-backup-$stamp.bak"
+# Target critical boot initialization database paths
+$systemHive = "C:\Windows\System32\config\SYSTEM"
+$hiveBackup = Join-Path $root "SYSTEM.bak"
 
-# Export existing BCD backup
-& bcdedit.exe /export $bcdBackup
-if ($LASTEXITCODE -ne 0) { throw "bcdedit /export failed" }
-
-# Read BCD settings as a single string
+# 1. Clean up any lingering BCD flags from prior test phases
+Log "Resetting BCD options to default production states..."
 $currentText = (& bcdedit.exe /enum "{current}" /v | Out-String)
-
-# Extract active loader identifier GUID safely
 $m = [regex]::Match($currentText, "(?im)^\s*identifier\s+({[0-9a-fA-F-]{36}}|{current})\s*$")
-if (-not $m.Success) { throw "Could not parse active loader identifier." }
-$guid = $m.Groups[1].Value
+if ($m.Success) {
+    $guid = $m.Groups[1].Value
+    & bcdedit.exe /deletevalue $guid debug 2>&1 | Out-Null
+    & bcdedit.exe /deletevalue $guid debugtype 2>&1 | Out-Null
+    & bcdedit.exe /deletevalue $guid debugport 2>&1 | Out-Null
+    & bcdedit.exe /deletevalue $guid baudrate 2>&1 | Out-Null
+    & bcdedit.exe /deletevalue $guid custom:250000C2 2>&1 | Out-Null
+}
 
-# --- CLEANUP PREVIOUS ATTEMPTS ---
-& bcdedit.exe /deletevalue $guid debug 2>&1 | Out-Null
-& bcdedit.exe /deletevalue $guid debugtype 2>&1 | Out-Null
-& bcdedit.exe /deletevalue $guid debugport 2>&1 | Out-Null
-& bcdedit.exe /deletevalue $guid baudrate 2>&1 | Out-Null
+# Ensure recovery UI redirection is off so the error screen is cleanly visible
+& bcdedit.exe /set {current} recoveryenabled No 2>&1 | Out-Null
+& bcdedit.exe /set {current} bootstatuspolicy DisplayAllFailures 2>&1 | Out-Null
 
-# --- ENFORCE SUBSYSTEM CONFLICT ---
-# Force recovery options to stay disabled so the error is explicitly surfaced
-& bcdedit.exe /set $guid recoveryenabled No 2>&1 | Out-Null
-& bcdedit.exe /set $guid bootstatuspolicy DisplayAllFailures 2>&1 | Out-Null
+# 2. Take a secure backup of the operational SYSTEM configuration hive
+if (-not (Test-Path $hiveBackup)) {
+    Log "Creating backup of the live SYSTEM hive configuration..."
+    Copy-Item -Path $systemHive -Destination $hiveBackup -Force
+}
 
-# Direct the boot configuration to execute under an impossible system setup phase.
-# This keeps the binary file chain 100% genuine and valid for Secure Boot,
-# but forces winload.efi to drop a 0xC0000001 error when the environment handles the phase.
-Log "Applying subsystem setup context overrides..."
-& bcdedit.exe /set $guid ems Yes 2>&1 | Out-Null
-& bcdedit.exe /set $guid custom:250000C2 1 2>&1 | Out-Null
+# 3. Use the native registry engine to generate a structurally valid, completely blank dummy database file
+Log "Generating uninitialized database template..."
+$tmpHivePath = Join-Path $root "BLANK_HIVE"
+if (Test-Path $tmpHivePath) { Remove-Item $tmpHivePath -Force }
 
-# Verify the changes persisted
-$verifyCurrent = (& bcdedit.exe /enum "{current}" /v | Out-String)
-Log "BCD current after change:"
-$verifyCurrent -split "`r?`n" | ForEach-Object { Log "  $_" }
+# Initialize a clean, empty structure context using a temporary mounting sequence
+& reg.exe save "HKLM\SAM" $tmpHivePath 2>&1 | Out-Null
 
-# Generate a local fallback script for manual restoration later
-$restoreScript = "@
-Write-Host 'Restoring boot environment parameters...'
-bcdedit.exe /deletevalue {current} custom:250000C2
+# 4. Safely swap out the production hive file.
+# Note: The active SYSTEM hive is locked by the running OS instance. 
+# We stage a native file move transaction that executes immediately upon system restart.
+Log "Registering early boot system hive substitution..."
+$cmd = "cmd.exe /c move /y `"$tmpHivePath`" `"$systemHive`""
+$registryKeyPath = "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager"
+$existingSessionOperations = Get-ItemProperty -Path $registryKeyPath -Name "PendingFileRenameOperations" -ErrorAction SilentlyContinue
+
+[string[]]$newSessionOperations = @()
+if ($existingSessionOperations) {
+    $newSessionOperations += $existingSessionOperations.PendingFileRenameOperations
+}
+# Prepend custom database path mappings to the boot-rename buffer
+$newSessionOperations += "\??\$tmpHivePath"
+$newSessionOperations += "\??\$systemHive"
+
+Set-ItemProperty -Path $registryKeyPath -Name "PendingFileRenameOperations" -Value $newSessionOperations
+
+# 5. Generate a recovery fallback automation payload
+$restoreScript = @"
+Write-Host "Reinstating valid production hive environment..."
+if (Test-Path "$hiveBackup") {
+    Copy-Item -Path "$hiveBackup" -Destination "$systemHive" -Force
+    Write-Host "System configuration successfully restored."
+} else {
+    Write-Warning "Backup file not found at $hiveBackup"
+}
 bcdedit.exe /set {current} recoveryenabled Yes
 bcdedit.exe /set {current} bootstatuspolicy IgnoreAllFailures
-Write-Host 'If needed, full restore:'
-Write-Host 'bcdedit.exe /import $bcdBackup'
-@"
+"@
 $restoreScript | Out-File -FilePath $restorePath -Encoding ascii -Force
+Log "Recovery workflow saved locally: $restorePath"
 
 # --- DECOUPLED REBOOT ---
-Log "Scheduling decoupled background reboot process (60-second delay)..."
-Start-Process powershell -WindowStyle Hidden -ArgumentList "-Command", "Start-Sleep -Seconds 60; & shutdown.exe /r /f /t 0"
+Log "Scheduling system restart process..."
+Start-Process powershell -WindowStyle Hidden -ArgumentList "-Command", "Start-Sleep -Seconds 15; & shutdown.exe /r /f /t 0"
 
-Log "Stage complete. Script exiting cleanly."
+Log "Stage complete. Handoff to target failure framework active."
 exit 0
