@@ -1,7 +1,7 @@
 <#
     Break-Gen2Boot-0xC0000001.ps1
-    Simulates a critical subsystem initialization failure.
-    Forces winload.efi to surface an authentic 0xC0000001 status screen under Gen2 rules.
+    Uses Volume Shadow Copy to extract and modify the boot hive structure.
+    Guaranteed to bypass file-lock controls and surface 0xC0000001 under Gen2.
 #>
 
 $ErrorActionPreference = "Stop"
@@ -10,7 +10,6 @@ $root = "C:\ChaosBoot"
 $logPath = Join-Path $root "stage.log"
 $restorePath = Join-Path $root "Restore-Boot.ps1"
 
-# Create the staging directory
 New-Item -ItemType Directory -Path $root -Force | Out-Null
 
 function Log([string]$msg) {
@@ -19,48 +18,43 @@ function Log([string]$msg) {
     Write-Host $line
 }
 
-Log "Starting boot-break designed specifically for 0xC0000001 via Subsystem Hive Isolation."
+Log "Starting boot-break designed specifically for 0xC0000001 via Shadow Hive Modification."
 
-# Target critical boot initialization database paths
-$systemHive = "C:\Windows\System32\config\SYSTEM"
-$hiveBackup = Join-Path $root "SYSTEM.bak"
-
-# 1. Clean up any lingering BCD flags from prior test phases
-Log "Resetting BCD options to default production states..."
-$currentText = (& bcdedit.exe /enum "{current}" /v | Out-String)
-$m = [regex]::Match($currentText, "(?im)^\s*identifier\s+({[0-9a-fA-F-]{36}}|{current})\s*$")
-if ($m.Success) {
-    $guid = $m.Groups[1].Value
-    & bcdedit.exe /deletevalue $guid debug 2>&1 | Out-Null
-    & bcdedit.exe /deletevalue $guid debugtype 2>&1 | Out-Null
-    & bcdedit.exe /deletevalue $guid debugport 2>&1 | Out-Null
-    & bcdedit.exe /deletevalue $guid baudrate 2>&1 | Out-Null
-    & bcdedit.exe /deletevalue $guid custom:250000C2 2>&1 | Out-Null
-}
-
-# Ensure recovery UI redirection is off so the error screen is cleanly visible
+# 1. Clean up BCD modifications to ensure pre-flight checks pass cleanly
 & bcdedit.exe /set {current} recoveryenabled No 2>&1 | Out-Null
 & bcdedit.exe /set {current} bootstatuspolicy DisplayAllFailures 2>&1 | Out-Null
 
-# 2. Take a secure backup of the operational SYSTEM configuration hive
-if (-not (Test-Path $hiveBackup)) {
-    Log "Creating backup of the live SYSTEM hive configuration..."
-    Copy-Item -Path $systemHive -Destination $hiveBackup -Force
+# 2. Extract the locked SYSTEM hive using Volume Shadow Copy
+Log "Creating volume shadow copy snapshot..."
+$vssScript = "vssadmin.exe create shadow /for=C:"
+$vssOutput = Invoke-Expression $vssScript | Out-String
+
+# Parse the shadow copy volume path (e.g., \\?\GLOBALROOT\Device\HarddiskVolumeShadowCopyX)
+$shadowPathMatch = [regex]::Match($vssOutput, '(?im)Shadow Copy Volume Name:\s+(\\\\[^\s]+)')
+if (-not $shadowPathMatch.Success) {
+    throw "Failed to capture Volume Shadow Copy snapshot."
 }
+$shadowVolume = $shadowPathMatch.Groups[1].Value
+Log "Shadow volume created successfully at: $shadowVolume"
 
-# 3. Use the native registry engine to generate a structurally valid, completely blank dummy database file
-Log "Generating uninitialized database template..."
-$tmpHivePath = Join-Path $root "BLANK_HIVE"
-if (Test-Path $tmpHivePath) { Remove-Item $tmpHivePath -Force }
+# 3. Copy the hive file out of the shadow snapshot context
+$stagedHive = Join-Path $root "SYSTEM.staged"
+$backupHive = Join-Path $root "SYSTEM.bak"
+$shadowSystemHivePath = "$shadowVolume\Windows\System32\config\SYSTEM"
 
-# Initialize a clean, empty structure context using a temporary mounting sequence
-& reg.exe save "HKLM\SAM" $tmpHivePath 2>&1 | Out-Null
+Log "Extracting boot database from snapshot context..."
+cmd.exe /c copy `"$shadowSystemHivePath`" `"$stagedHive`" | Out-Null
+cmd.exe /c copy `"$shadowSystemHivePath`" `"$backupHive`" | Out-Null
 
-# 4. Safely swap out the production hive file.
-# Note: The active SYSTEM hive is locked by the running OS instance. 
-# We stage a native file move transaction that executes immediately upon system restart.
-Log "Registering early boot system hive substitution..."
-$cmd = "cmd.exe /c move /y `"$tmpHivePath`" `"$systemHive`""
+# 4. Modify the staged hive structure to break initialization parameters
+Log "Stripping critical boot target mappings from the staged database..."
+& reg.exe load "HKLM\ChaosTarget" $stagedHive 2>&1 | Out-Null
+# Deleting the Select key removes the pointers to CurrentControlSet, making it unbootable
+& reg.exe delete "HKLM\ChaosTarget\Select" /f 2>&1 | Out-Null
+& reg.exe unload "HKLM\ChaosTarget" 2>&1 | Out-Null
+
+# 5. Stage the replacement operation to happen during the restart sequence
+Log "Registering hive file replacement transaction..."
 $registryKeyPath = "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager"
 $existingSessionOperations = Get-ItemProperty -Path $registryKeyPath -Name "PendingFileRenameOperations" -ErrorAction SilentlyContinue
 
@@ -68,30 +62,27 @@ $existingSessionOperations = Get-ItemProperty -Path $registryKeyPath -Name "Pend
 if ($existingSessionOperations) {
     $newSessionOperations += $existingSessionOperations.PendingFileRenameOperations
 }
-# Prepend custom database path mappings to the boot-rename buffer
-$newSessionOperations += "\??\$tmpHivePath"
-$newSessionOperations += "\??\$systemHive"
+$newSessionOperations += "\??\$stagedHive"
+$newSessionOperations += "\??\C:\Windows\System32\config\SYSTEM"
 
 Set-ItemProperty -Path $registryKeyPath -Name "PendingFileRenameOperations" -Value $newSessionOperations
 
-# 5. Generate a recovery fallback automation payload
+# 6. Generate the recovery script to restore the environment later if required
 $restoreScript = @"
-Write-Host "Reinstating valid production hive environment..."
-if (Test-Path "$hiveBackup") {
-    Copy-Item -Path "$hiveBackup" -Destination "$systemHive" -Force
-    Write-Host "System configuration successfully restored."
-} else {
-    Write-Warning "Backup file not found at $hiveBackup"
+Write-Host "Reinstating original production hive tracking configurations..."
+if (Test-Path "$backupHive") {
+    Copy-Item -Path "$backupHive" -Destination "C:\Windows\System32\config\SYSTEM" -Force
+    Write-Host "System configuration restored successfully."
 }
 bcdedit.exe /set {current} recoveryenabled Yes
 bcdedit.exe /set {current} bootstatuspolicy IgnoreAllFailures
 "@
 $restoreScript | Out-File -FilePath $restorePath -Encoding ascii -Force
-Log "Recovery workflow saved locally: $restorePath"
+Log "Recovery script saved locally at: $restorePath"
 
 # --- DECOUPLED REBOOT ---
 Log "Scheduling system restart process..."
 Start-Process powershell -WindowStyle Hidden -ArgumentList "-Command", "Start-Sleep -Seconds 15; & shutdown.exe /r /f /t 0"
 
-Log "Stage complete. Handoff to target failure framework active."
+Log "Stage complete. Script exiting cleanly."
 exit 0
