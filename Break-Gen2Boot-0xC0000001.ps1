@@ -1,7 +1,7 @@
 <#
     Break-Gen2Boot-0xC0000001.ps1
-    Intentionally breaks next boot by replacing the bootloader with a valid PE binary (cmd.exe).
-    Designed to bypass Secure Boot restrictions and trigger error code 0xC0000001.
+    Replaces the bootloader with a corrupted but validly structured UEFI binary (memtest.efi).
+    Designed to trigger error code 0xC0000001 on Secure Boot / Gen2 environments.
 #>
 
 $ErrorActionPreference = "Stop"
@@ -19,7 +19,7 @@ function Log([string]$msg) {
     Write-Host $line
 }
 
-Log "Starting boot-break designed specifically for 0xC0000001 via valid PE substitution."
+Log "Starting boot-break designed specifically for 0xC0000001 using a modified UEFI binary."
 
 $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
 $bcdBackup = Join-Path $root "bcd-backup-$stamp.bak"
@@ -42,13 +42,28 @@ if (-not $m.Success) {
 $guid = $m.Groups[1].Value
 Log "Target loader identifier: $guid"
 
-# --- THE 0xC0000001 PE TRICK ---
-# Copy cmd.exe to winload.efi.broken. 
-# It has a perfectly valid 64-bit executable header structure, so it completely 
-# avoids the 0xc000007b format error. However, it will fail to initialize as a boot application.
+# --- THE 0xC0000001 UEFI SUBSYSTEM TRICK ---
+# 1. Use an actual valid UEFI subsystem binary (memtest.efi) to bypass the 0xc000007b check
+$sourceUefi = "C:\Windows\System32\memtest.efi"
 $fakeLoaderPath = "C:\Windows\System32\winload.efi.broken"
-Copy-Item "C:\Windows\System32\cmd.exe" -Destination $fakeLoaderPath -Force
-Log "Valid PE application (cmd.exe) staged at $fakeLoaderPath"
+
+if (-not (Test-Path $sourceUefi)) {
+    # Fallback to winresume.efi if memtest.efi isn't present
+    $sourceUefi = "C:\Windows\System32\winresume.efi"
+}
+
+Log "Copying a valid UEFI image source from $sourceUefi"
+Copy-Item $sourceUefi -Destination $fakeLoaderPath -Force
+
+# 2. Open the file and zero out a chunk of the trailing code execution block.
+# This leaves the standard UEFI PE/COFF headers perfectly intact (avoiding 7b), 
+# but violates security hash integrity during signature validation, yielding 0xC0000001.
+$bytes = [System.IO.File]::ReadAllBytes($fakeLoaderPath)
+for ($i = ($bytes.Length - 2000); $i -lt ($bytes.Length - 10); $i++) {
+    $bytes[$i] = 0x00
+}
+[System.IO.File]::WriteAllBytes($fakeLoaderPath, $bytes)
+Log "UEFI image signed envelope broken intentionally at $fakeLoaderPath"
 
 # Apply the broken path to active loader
 $out1 = & bcdedit.exe /set $guid path \Windows\System32\winload.efi.broken 2>&1
@@ -65,12 +80,11 @@ if ($out2) { $out2 | ForEach-Object { Log "  $_" } }
 
 # Verify the changes persisted
 $verifyCurrent = (& bcdedit.exe /enum "{current}" /v | Out-String)
-$verifyDefault = (& bcdedit.exe /enum "{default}" /v | Out-String)
 Log "BCD current after change:"
 $verifyCurrent -split "`r?`n" | ForEach-Object { Log "  $_" }
 
-if (($verifyCurrent -notmatch "winload\.efi\.broken") -and ($verifyDefault -notmatch "winload\.efi\.broken")) {
-    throw "Verification failed: neither {current} nor {default} shows broken winload path."
+if ($verifyCurrent -notmatch "winload\.efi\.broken") {
+    throw "Verification failed: BCD does not show broken winload path."
 }
 
 # Generate a local fallback script for manual restoration later
@@ -86,6 +100,7 @@ $restoreScript | Out-File -FilePath $restorePath -Encoding ascii -Force
 Log "Restore script written: $restorePath"
 
 # --- DECOUPLED REBOOT ---
+# Background job ensures that the runCommand context exits cleanly with 0 back to Azure first
 Log "Scheduling decoupled background reboot process (60-second delay)..."
 Start-Process powershell -WindowStyle Hidden -ArgumentList "-Command", "Start-Sleep -Seconds 60; & shutdown.exe /r /f /t 0"
 
