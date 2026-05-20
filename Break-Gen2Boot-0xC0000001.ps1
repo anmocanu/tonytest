@@ -1,6 +1,6 @@
 <#
     Break-Gen2Boot-0xC0000001.ps1
-    Intentionally breaks next boot by changing winload path to an invalid file format.
+    Intentionally breaks next boot by changing winload path to an invalid binary payload.
     Designed to trigger error code 0xC0000001 under Azure RunCommand context.
 #>
 
@@ -19,12 +19,12 @@ function Log([string]$msg) {
     Write-Host $line
 }
 
-Log "Starting boot-break designed for 0xC0000001."
+Log "Starting boot-break designed specifically for 0xC0000001."
 
 $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
 $bcdBackup = Join-Path $root "bcd-backup-$stamp.bak"
 
-# Export existing BCD backup
+# Export existing BCD backup [cite: 1]
 & bcdedit.exe /export $bcdBackup
 if ($LASTEXITCODE -ne 0) { throw "bcdedit /export failed with code $LASTEXITCODE" }
 Log "BCD backup created: $bcdBackup"
@@ -42,14 +42,20 @@ if (-not $m.Success) {
 $guid = $m.Groups[1].Value
 Log "Target loader identifier: $guid"
 
-# --- CORE FIX FOR 0xC0000001 ---
-# Create a dummy text file at the target path. Because the file physically exists, 
-# Boot Manager will find it (avoiding 0xc000000f) but fail execution due to invalid headers (triggering 0xC0000001).
+# --- REMEDIAL PAYLOAD FOR 0xC0000001 ---
+# Instead of a plain text string (which triggers 0xc000007b), we provide a 
+# pseudo-binary structure that passes basic format parsing but crashes on execution signature checks.
 $fakeLoaderPath = "C:\Windows\System32\winload.efi.broken"
-"This text string replaces a valid PE-COFF executable structure." | Out-File -FilePath $fakeLoaderPath -Encoding ascii -Force
-Log "Dummy file generated at $fakeLoaderPath"
 
-# Apply the broken path to active loader
+# Start with a standard MZ PE header signature to satisfy the image format check
+[byte[]]$pePayload = @(0x4d, 0x5a, 0x90, 0x00, 0x03, 0x00, 0x00, 0x00) 
+# Pad out the file with empty execution structures
+$pePayload += ,0x00 * 500 
+
+[System.IO.File]::WriteAllBytes($fakeLoaderPath, $pePayload)
+Log "PE-masked dummy file generated at $fakeLoaderPath"
+
+# Apply the broken path to active loader [cite: 1]
 $out1 = & bcdedit.exe /set $guid path \Windows\System32\winload.efi.broken 2>&1
 $code1 = $LASTEXITCODE
 Log "Set path on $guid exit code: $code1"
@@ -87,8 +93,8 @@ $restoreScript | Out-File -FilePath $restorePath -Encoding ascii -Force
 Log "Restore script written: $restorePath"
 
 # --- DECOUPLED REBOOT ---
-# Launch a hidden background process that sleeps for 60 seconds.
-# This gives the Azure fabric ample time to receive the 'Stage complete' signal and process exit code 0.
+# Launch a hidden background process that sleeps for 60 seconds[cite: 1].
+# This gives the Azure fabric ample time to receive the 'Stage complete' signal and process exit code 0[cite: 1].
 Log "Scheduling decoupled background reboot process (60-second delay)..."
 Start-Process powershell -WindowStyle Hidden -ArgumentList "-Command", "Start-Sleep -Seconds 60; & shutdown.exe /r /f /t 0"
 
