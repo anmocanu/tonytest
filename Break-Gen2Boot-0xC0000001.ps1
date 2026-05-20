@@ -1,7 +1,7 @@
 <#
     Break-Gen2Boot-0xC0000001.ps1
-    Intentionally creates a Code Integrity conflict under Secure Boot environments.
-    Guaranteed to bypass file format, checksum, and existence checks to surface 0xC0000001.
+    Intentionally restricts boot initialization by supplying an invalid custom HAL name.
+    Designed to trigger the exact error code 0xC0000001 on Gen2 / Trusted Launch VMs.
 #>
 
 $ErrorActionPreference = "Stop"
@@ -19,7 +19,7 @@ function Log([string]$msg) {
     Write-Host $line
 }
 
-Log "Starting boot-break designed specifically for 0xC0000001 via Integrity Enforcement Conflict."
+Log "Starting boot-break designed specifically for 0xC0000001 via HAL Diversion Mapping."
 
 $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
 $bcdBackup = Join-Path $root "bcd-backup-$stamp.bak"
@@ -42,19 +42,19 @@ if (-not $m.Success) {
 $guid = $m.Groups[1].Value
 Log "Target loader identifier: $guid"
 
-# --- THE CODE INTEGRITY CONFLICT TRICK ---
-# 1. Reset systemroot back to original so it passes pre-flight file verification
-& bcdedit.exe /set $guid systemroot "\Windows" 2>&1 | Out-Null
+# --- THE DEFINITIVE HAL MAPPING TRICK ---
+# Clean up experimental parameters from previous iterations
+& bcdedit.exe /deletevalue $guid testsigning 2>&1 | Out-Null
+& bcdedit.exe /deletevalue $guid nointegritychecks 2>&1 | Out-Null
 
-# 2. Stop automatic recovery options from hijacking the failure screen
+# Force recovery options to stay disabled so the error is explicitly surfaced
 & bcdedit.exe /set $guid recoveryenabled No 2>&1 | Out-Null
 & bcdedit.exe /set $guid bootstatuspolicy DisplayAllFailures 2>&1 | Out-Null
 
-# 3. Force an execution violation by demanding test signing execution layouts 
-# while the hardware environment enforces production Secure Boot constraints.
-Log "Injecting runtime validation conflicts..."
-& bcdedit.exe /set $guid testsigning Yes 2>&1 | Out-Null
-& bcdedit.exe /set $guid nointegritychecks Yes 2>&1 | Out-Null
+# Inject an invalid custom HAL file parameter string.
+# This passes pre-flight checks but completely breaks the execution loop with 0xC0000001.
+Log "Configuring invalid HAL file target variable..."
+& bcdedit.exe /set $guid hal "chaos_hal.dll" 2>&1 | Out-Null
 
 # Verify the changes persisted
 $verifyCurrent = (& bcdedit.exe /enum "{current}" /v | Out-String)
@@ -64,11 +64,9 @@ $verifyCurrent -split "`r?`n" | ForEach-Object { Log "  $_" }
 # Generate a local fallback script for manual restoration later
 $restoreScript = @"
 Write-Host "Restoring boot environment parameters..."
-bcdedit.exe /set {current} systemroot "\Windows"
+bcdedit.exe /deletevalue {current} hal
 bcdedit.exe /set {current} recoveryenabled Yes
 bcdedit.exe /set {current} bootstatuspolicy IgnoreAllFailures
-bcdedit.exe /deletevalue {current} testsigning
-bcdedit.exe /deletevalue {current} nointegritychecks
 Write-Host "If needed, full restore:"
 Write-Host "bcdedit.exe /import $bcdBackup"
 "@
