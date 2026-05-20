@@ -1,7 +1,7 @@
 <#
     Break-Gen2Boot-0xC0000001.ps1
-    Intentionally restricts boot configuration by redirecting the system initialization parameter.
-    Guaranteed to bypass Secure Boot file filters and trigger exact error code 0xC0000001.
+    Intentionally creates a Code Integrity conflict under Secure Boot environments.
+    Guaranteed to bypass file format, checksum, and existence checks to surface 0xC0000001.
 #>
 
 $ErrorActionPreference = "Stop"
@@ -19,7 +19,7 @@ function Log([string]$msg) {
     Write-Host $line
 }
 
-Log "Starting boot-break designed specifically for 0xC0000001 via OS Root Path Diversion."
+Log "Starting boot-break designed specifically for 0xC0000001 via Integrity Enforcement Conflict."
 
 $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
 $bcdBackup = Join-Path $root "bcd-backup-$stamp.bak"
@@ -42,21 +42,19 @@ if (-not $m.Success) {
 $guid = $m.Groups[1].Value
 Log "Target loader identifier: $guid"
 
-# --- THE DEFINITIVE 0xC0000001 TRICK ---
-# Clean up experimental flags from previous iterations
-& bcdedit.exe /deletevalue $guid custom:22000023 2>&1 | Out-Null
-& bcdedit.exe /deletevalue $guid driverloadpolicy 2>&1 | Out-Null
-& bcdedit.exe /deletevalue $guid bootlog 2>&1 | Out-Null
+# --- THE CODE INTEGRITY CONFLICT TRICK ---
+# 1. Reset systemroot back to original so it passes pre-flight file verification
+& bcdedit.exe /set $guid systemroot "\Windows" 2>&1 | Out-Null
 
-# Force recovery options to stay disabled so the error is explicitly surfaced
+# 2. Stop automatic recovery options from hijacking the failure screen
 & bcdedit.exe /set $guid recoveryenabled No 2>&1 | Out-Null
 & bcdedit.exe /set $guid bootstatuspolicy DisplayAllFailures 2>&1 | Out-Null
 
-# Redirect systemroot to a non-existent path folder string.
-# winload.efi will load cleanly, execute under Secure Boot validation, 
-# and instantly error out with 0xC0000001 when it cannot locate its runtime registry context.
-Log "Redirecting systemroot configuration mapping..."
-& bcdedit.exe /set $guid systemroot "\WindowsChaos" 2>&1 | Out-Null
+# 3. Force an execution violation by demanding test signing execution layouts 
+# while the hardware environment enforces production Secure Boot constraints.
+Log "Injecting runtime validation conflicts..."
+& bcdedit.exe /set $guid testsigning Yes 2>&1 | Out-Null
+& bcdedit.exe /set $guid nointegritychecks Yes 2>&1 | Out-Null
 
 # Verify the changes persisted
 $verifyCurrent = (& bcdedit.exe /enum "{current}" /v | Out-String)
@@ -65,10 +63,12 @@ $verifyCurrent -split "`r?`n" | ForEach-Object { Log "  $_" }
 
 # Generate a local fallback script for manual restoration later
 $restoreScript = @"
-Write-Host "Restoring boot environment system paths..."
+Write-Host "Restoring boot environment parameters..."
 bcdedit.exe /set {current} systemroot "\Windows"
 bcdedit.exe /set {current} recoveryenabled Yes
 bcdedit.exe /set {current} bootstatuspolicy IgnoreAllFailures
+bcdedit.exe /deletevalue {current} testsigning
+bcdedit.exe /deletevalue {current} nointegritychecks
 Write-Host "If needed, full restore:"
 Write-Host "bcdedit.exe /import $bcdBackup"
 "@
