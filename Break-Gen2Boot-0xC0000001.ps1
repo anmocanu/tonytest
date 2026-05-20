@@ -1,7 +1,7 @@
 <#
     Break-Gen2Boot-0xC0000001.ps1
-    Replaces the bootloader with a corrupted but validly structured UEFI binary (memtest.efi).
-    Designed to trigger error code 0xC0000001 on Secure Boot / Gen2 environments.
+    Intentionally breaks next boot by replacing winload with an unconfigured bootloader application.
+    Designed to bypass checksum verification and trigger error code 0xC0000001 on Gen2 VMs.
 #>
 
 $ErrorActionPreference = "Stop"
@@ -19,7 +19,7 @@ function Log([string]$msg) {
     Write-Host $line
 }
 
-Log "Starting boot-break designed specifically for 0xC0000001 using a modified UEFI binary."
+Log "Starting boot-break designed specifically for 0xC0000001 via unconfigured loader application mapping."
 
 $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
 $bcdBackup = Join-Path $root "bcd-backup-$stamp.bak"
@@ -42,28 +42,16 @@ if (-not $m.Success) {
 $guid = $m.Groups[1].Value
 Log "Target loader identifier: $guid"
 
-# --- THE 0xC0000001 UEFI SUBSYSTEM TRICK ---
-# 1. Use an actual valid UEFI subsystem binary (memtest.efi) to bypass the 0xc000007b check
-$sourceUefi = "C:\Windows\System32\memtest.efi"
+# --- THE 0xC0000001 PURE RUNTIME EXECUTION FAIL ---
+# Copy the actual unaltered Windows Boot Manager launcher binary to the path.
+# This contains standard structural layout and accurate header checksum parameters (avoiding 7b and 221).
+# However, launching it within a winload execution role triggers a 0xC0000001 early runtime initialization failure.
+$sourceUefi = "C:\Windows\Boot\EFI\bootmgfw.efi"
 $fakeLoaderPath = "C:\Windows\System32\winload.efi.broken"
 
-if (-not (Test-Path $sourceUefi)) {
-    # Fallback to winresume.efi if memtest.efi isn't present
-    $sourceUefi = "C:\Windows\System32\winresume.efi"
-}
-
-Log "Copying a valid UEFI image source from $sourceUefi"
+Log "Copying unaltered signed UEFI loader application from $sourceUefi"
 Copy-Item $sourceUefi -Destination $fakeLoaderPath -Force
-
-# 2. Open the file and zero out a chunk of the trailing code execution block.
-# This leaves the standard UEFI PE/COFF headers perfectly intact (avoiding 7b), 
-# but violates security hash integrity during signature validation, yielding 0xC0000001.
-$bytes = [System.IO.File]::ReadAllBytes($fakeLoaderPath)
-for ($i = ($bytes.Length - 2000); $i -lt ($bytes.Length - 10); $i++) {
-    $bytes[$i] = 0x00
-}
-[System.IO.File]::WriteAllBytes($fakeLoaderPath, $bytes)
-Log "UEFI image signed envelope broken intentionally at $fakeLoaderPath"
+Log "Pristine binary mapped to target location: $fakeLoaderPath"
 
 # Apply the broken path to active loader
 $out1 = & bcdedit.exe /set $guid path \Windows\System32\winload.efi.broken 2>&1
@@ -100,7 +88,7 @@ $restoreScript | Out-File -FilePath $restorePath -Encoding ascii -Force
 Log "Restore script written: $restorePath"
 
 # --- DECOUPLED REBOOT ---
-# Background job ensures that the runCommand context exits cleanly with 0 back to Azure first
+# Delays system reboot sequence to ensure the Run Command logs a success response to the ARM template first
 Log "Scheduling decoupled background reboot process (60-second delay)..."
 Start-Process powershell -WindowStyle Hidden -ArgumentList "-Command", "Start-Sleep -Seconds 60; & shutdown.exe /r /f /t 0"
 
