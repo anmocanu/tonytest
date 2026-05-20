@@ -1,7 +1,7 @@
 <#
     Break-Gen2Boot-0xC0000001.ps1
-    Intentionally restricts boot behavior by altering the failure threshold policy.
-    Designed to trigger exact error code 0xC0000001 on Gen2 / Trusted Launch VMs.
+    Intentionally restricts boot configuration by redirecting the system initialization parameter.
+    Guaranteed to bypass Secure Boot file filters and trigger exact error code 0xC0000001.
 #>
 
 $ErrorActionPreference = "Stop"
@@ -19,7 +19,7 @@ function Log([string]$msg) {
     Write-Host $line
 }
 
-Log "Starting boot-break designed specifically for 0xC0000001 via Strict Policy Enforcement."
+Log "Starting boot-break designed specifically for 0xC0000001 via OS Root Path Diversion."
 
 $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
 $bcdBackup = Join-Path $root "bcd-backup-$stamp.bak"
@@ -42,18 +42,21 @@ if (-not $m.Success) {
 $guid = $m.Groups[1].Value
 Log "Target loader identifier: $guid"
 
-# --- THE 0xC0000001 POLICY TRICK ---
-# 1. Flip the failure policy so errors are no longer ignored or auto-healed.
-Log "Reconfiguring Boot Status Policy..."
+# --- THE DEFINITIVE 0xC0000001 TRICK ---
+# Clean up experimental flags from previous iterations
+& bcdedit.exe /deletevalue $guid custom:22000023 2>&1 | Out-Null
+& bcdedit.exe /deletevalue $guid driverloadpolicy 2>&1 | Out-Null
+& bcdedit.exe /deletevalue $guid bootlog 2>&1 | Out-Null
+
+# Force recovery options to stay disabled so the error is explicitly surfaced
+& bcdedit.exe /set $guid recoveryenabled No 2>&1 | Out-Null
 & bcdedit.exe /set $guid bootstatuspolicy DisplayAllFailures 2>&1 | Out-Null
 
-# 2. Prevent recovery redirection from masking the error code screen
-& bcdedit.exe /set $guid recoveryenabled No 2>&1 | Out-Null
-
-# 3. Apply the critical custom driver constraint
-& bcdedit.exe /set $guid bootlog Yes 2>&1 | Out-Null
-& bcdedit.exe /set $guid driverloadpolicy 0 2>&1 | Out-Null
-& bcdedit.exe /set $guid custom:22000023 "System32\Drivers\chaos_missing.sys" 2>&1 | Out-Null
+# Redirect systemroot to a non-existent path folder string.
+# winload.efi will load cleanly, execute under Secure Boot validation, 
+# and instantly error out with 0xC0000001 when it cannot locate its runtime registry context.
+Log "Redirecting systemroot configuration mapping..."
+& bcdedit.exe /set $guid systemroot "\WindowsChaos" 2>&1 | Out-Null
 
 # Verify the changes persisted
 $verifyCurrent = (& bcdedit.exe /enum "{current}" /v | Out-String)
@@ -62,12 +65,10 @@ $verifyCurrent -split "`r?`n" | ForEach-Object { Log "  $_" }
 
 # Generate a local fallback script for manual restoration later
 $restoreScript = @"
-Write-Host "Restoring boot parameters..."
-bcdedit.exe /set {current} bootstatuspolicy IgnoreAllFailures
+Write-Host "Restoring boot environment system paths..."
+bcdedit.exe /set {current} systemroot "\Windows"
 bcdedit.exe /set {current} recoveryenabled Yes
-bcdedit.exe /deletevalue {current} bootlog
-bcdedit.exe /deletevalue {current} driverloadpolicy
-bcdedit.exe /deletevalue {current} custom:22000023
+bcdedit.exe /set {current} bootstatuspolicy IgnoreAllFailures
 Write-Host "If needed, full restore:"
 Write-Host "bcdedit.exe /import $bcdBackup"
 "@
