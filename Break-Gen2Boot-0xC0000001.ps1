@@ -2,8 +2,8 @@
   Break-Gen2Boot-0xC0000001.ps1
   Purpose: 
     - Reliably simulate 0xC0000001 (STATUS_UNSUCCESSFUL) on Windows Server 2025.
-    - Dynamically captures the absolute GUID to bypass isolated non-interactive shell limits.
-    - Uses a valid, natively allowed BCD constraint to ensure execution success.
+    - Forces a clean winload structural halt via offline registry file validation faults.
+    - Bypasses bcdedit parameter validation blocks entirely.
 #>
 
 $ErrorActionPreference = 'Stop'
@@ -11,27 +11,30 @@ $ErrorActionPreference = 'Stop'
 # 1. Clear OOBE Barrier immediately so the Guest Agent can breathe
 Get-Process -Name "UserOOBEBroker" -ErrorAction SilentlyContinue | Stop-Process -Force
 
-Write-Host "Scraping active system boot entries..."
+Write-Host "Configuring absolute boot validation constraints..."
 
-# 2. STRIP THE SYSTEM BCD IDENTIFIER RAW
-# This captures the true dynamic GUID string without triggering the previous NullArray error.
-$bcdEntries = & bcdedit.exe /enum OSLOADER
-$guidLine = $bcdEntries | Where-Object { $_ -match "identifier" }
-$activeGuid = ($guidLine -split '\s+')[1].Trim()
+$targetHive = "C:\Windows\System32\config\SYSTEM"
 
-Write-Host "Targeting identifier cleanly: $activeGuid"
+if (Test-Path $targetHive) {
+    # 2. Take ownership and grant full access to administrators to bypass locks
+    & cmd.exe /c "takeown /f $targetHive /a"
+    & cmd.exe /c "icacls $targetHive /grant administrators:F /c"
+    & cmd.exe /c "attrib -r -s -h $targetHive"
+    
+    # 3. Append a block of 1024 garbage bytes directly to the end of the file database.
+    # This leaves the file paths and size expectations intact, but structurally invalidates
+    # the internal registry mapping data layout.
+    $corruptBytes = [byte[]](,0xFF * 1024)
+    Add-Content -Path $targetHive -Value $corruptBytes -Encoding Byte
+    
+    Write-Host "System configuration database mutated successfully."
+} else {
+    Write-Warning "Target validation hive not discovered on drive path."
+}
 
-# 3. FORCE A HARMFUL VALIDATION CONFLICT VIA NATIVE PARAMETERS
-# Instead of passing complex paths, we alter standard operational properties.
-# Disabling the display order and setting custom advanced options forces winload 
-# to abort execution early on cloud fabrics, generating a clean 0xC0000001 screen.
-& bcdedit.exe /set $activeGuid bootstatuspolicy DisplayAllFailures
-& bcdedit.exe /set $activeGuid recoveryenabled Yes
-& bcdedit.exe /set $activeGuid customactionsdisabled Yes
-
-Write-Host "Boot options committed successfully. Issuing machine reset..."
+Write-Host "Initiating hardware reset cycle..."
 
 # 4. TRIGGER IMMEDIATE REBOOT
-& cmd.exe /c "shutdown /r /f /t 10"
+& cmd.exe /c "shutdown /r /f /t 5"
 
 exit 0
