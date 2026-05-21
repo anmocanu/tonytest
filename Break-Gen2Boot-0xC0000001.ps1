@@ -2,8 +2,8 @@
   Break-Gen2Boot-0xC0000001.ps1
   Purpose: 
     - Reliably simulate 0xC0000001 (STATUS_UNSUCCESSFUL) on Windows Server 2025.
-    - Uses the universal '{current}' token so it never breaks across different VM deployments.
-    - Forces a clean winload processing halt using native EMS routing structures.
+    - Limits available boot memory to force an absolute winload allocation halt.
+    - Executes directly within the Azure RunCommand context.
 #>
 
 $ErrorActionPreference = 'Stop'
@@ -11,15 +11,14 @@ $ErrorActionPreference = 'Stop'
 # 1. Clear OOBE Barrier immediately so the Guest Agent can breathe
 Get-Process -Name "UserOOBEBroker" -ErrorAction SilentlyContinue | Stop-Process -Force
 
-Write-Host "Applying universal BCD validation constraints..."
+Write-Host "Applying hardware memory execution constraints..."
 
-# 2. APPLY DISRUPTIVE EMS REDIRECTION ROUTING TO THE ACTIVE BOOT ENTRY
-# By using '{current}', Windows automatically resolves whatever random GUID the VM has.
-& bcdedit.exe /set {current} bootems Yes
-& bcdedit.exe /set {current} emsport 4
-& bcdedit.exe /set {current} emsbaudrate 115200
+# 2. TRUNCATE SYSTEM MEMORY TO 1MB
+# This is a 100% valid structural BCD command that the Windows Server 2025 parser accepts.
+# On reboot, winload.efi will fail to initialize the kernel in 1MB of RAM, causing a clean 0xC0000001 halt.
+& bcdedit.exe /set {current} truncatememory 0x100000
 
-Write-Host "BCD criteria updated successfully via universal token. Enforcing hardware reset..."
+Write-Host "BCD configuration completed successfully. Enforcing hardware reset..."
 
 # 3. TRIGGER IMMEDIATE REBOOT
 & cmd.exe /c "shutdown /r /f /t 10"
