@@ -1,41 +1,35 @@
 <#
 Break-Gen2-0xC0000001.ps1
-
 Purpose:
-- Deterministically simulate 0xC0000001 on Gen2 (UEFI) Azure VMs
-- Targets EFI BCD corruption (Boot Manager stage)
-- Safe for RunCommand execution (fast, no long ACL loops)
+- Force Boot Manager failure (not kernel failure)
+- Trigger 0xC0000001 reliably in Gen2
 #>
 
 $ErrorActionPreference = 'Stop'
 
-Write-Host "Mounting EFI System Partition..."
+$drive = "S:"
+$bcdPath = "$drive\EFI\Microsoft\Boot\BCD"
 
-$efiDrive = "S:"
-cmd.exe /c "mountvol $efiDrive /S" | Out-Null
-
-$bcdPath = "$efiDrive\EFI\Microsoft\Boot\BCD"
+Write-Host "Mounting EFI partition..."
+cmd /c "mountvol $drive /S"
 
 if (!(Test-Path $bcdPath)) {
-    Write-Error "EFI BCD not found at $bcdPath. Abort."
+    Write-Error "BCD not found at $bcdPath"
     exit 1
 }
 
-Write-Host "Corrupting EFI BCD (preserving file presence)..."
-
-# Take ownership (fast path)
+Write-Host "Taking ownership..."
 takeown /f $bcdPath | Out-Null
 icacls $bcdPath /grant administrators:F | Out-Null
 
-# Corrupt content instead of deleting
-# (critical for keeping Boot Manager flow intact)
-Set-Content -Path $bcdPath -Value "CORRUPTED_BOOT_CONFIG"
+Write-Host "Corrupting BCD (not deleting)..."
 
-Write-Host "Dismounting EFI partition..."
-cmd.exe /c "mountvol $efiDrive /D" | Out-Null
+# IMPORTANT: corrupt content, do NOT remove file
+[System.IO.File]::WriteAllText($bcdPath, "BADBCD")
 
-Write-Host "Scheduling reboot..."
-cmd.exe /c "shutdown /r /f /t 10"
+Write-Host "Setting boot policy to expose real failure..."
+bcdedit /set {default} bootstatuspolicy IgnoreAllFailures
+bcdedit /set {default} recoveryenabled No
 
-exit 0
-
+Write-Host "Rebooting..."
+shutdown /r /f /t 10
