@@ -1,27 +1,41 @@
 <#
-  Break-Gen2Boot-0xC0000001.ps1
-  Purpose: 
-    - Reliably simulate 0xC0000001 (STATUS_UNSUCCESSFUL) on Windows Server 2025.
-    - Executes instantly to prevent Azure Guest Agent concurrency errors (MultipleExtensionsPerHandler).
+Break-Gen2-0xC0000001.ps1
+
+Purpose:
+- Deterministically simulate 0xC0000001 on Gen2 (UEFI) Azure VMs
+- Targets EFI BCD corruption (Boot Manager stage)
+- Safe for RunCommand execution (fast, no long ACL loops)
 #>
 
 $ErrorActionPreference = 'Stop'
 
-# Clear OOBE Barrier instantly so the Guest Agent can process status logs
-Get-Process -Name "UserOOBEBroker" -ErrorAction SilentlyContinue | Stop-Process -Force
+Write-Host "Mounting EFI System Partition..."
 
-Write-Host "Configuring instantaneous validation constraints..."
+$efiDrive = "S:"
+cmd.exe /c "mountvol $efiDrive /S" | Out-Null
 
-# Target a critical boot-critical driver that doesn't require takeown modifications
-$targetPath = "C:\Windows\System32\drivers\mountmgr.sys"
+$bcdPath = "$efiDrive\EFI\Microsoft\Boot\BCD"
 
-if (Test-Path $targetPath) {
-    # Move the file instantly using native .NET methods (bypasses heavy icacls loops)
-    [System.IO.File]::Move($targetPath, "$targetPath.bak")
-    Write-Host "Execution matrix adjusted successfully."
+if (!(Test-Path $bcdPath)) {
+    Write-Error "EFI BCD not found at $bcdPath. Abort."
+    exit 1
 }
 
-Write-Host "Issuing rapid reset..."
-& cmd.exe /c "shutdown /r /f /t 5"
+Write-Host "Corrupting EFI BCD (preserving file presence)..."
+
+# Take ownership (fast path)
+takeown /f $bcdPath | Out-Null
+icacls $bcdPath /grant administrators:F | Out-Null
+
+# Corrupt content instead of deleting
+# (critical for keeping Boot Manager flow intact)
+Set-Content -Path $bcdPath -Value "CORRUPTED_BOOT_CONFIG"
+
+Write-Host "Dismounting EFI partition..."
+cmd.exe /c "mountvol $efiDrive /D" | Out-Null
+
+Write-Host "Scheduling reboot..."
+cmd.exe /c "shutdown /r /f /t 10"
 
 exit 0
+
