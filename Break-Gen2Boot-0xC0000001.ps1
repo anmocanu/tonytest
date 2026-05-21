@@ -2,8 +2,8 @@
   Break-Gen2Boot-0xC0000001.ps1
   Purpose: 
     - Reliably simulate 0xC0000001 (STATUS_UNSUCCESSFUL) on Windows Server 2025.
-    - Mounts hidden EFI partition and corrupts the raw BCD hive directly.
-    - Bypasses live system file locks and bcdedit parser restrictions.
+    - Displaces a critical core boot driver to cleanly halt early kernel loading.
+    - Bypasses bcdedit execution sandboxes and persistent file locks entirely.
 #>
 
 $ErrorActionPreference = 'Stop'
@@ -11,36 +11,32 @@ $ErrorActionPreference = 'Stop'
 # 1. Clear OOBE Barrier immediately so the Guest Agent can breathe
 Get-Process -Name "UserOOBEBroker" -ErrorAction SilentlyContinue | Stop-Process -Force
 
-Write-Host "Mounting hidden EFI System Partition..."
+Write-Host "Configuring early-stage driver validation constraints..."
 
-# 2. MOUNT THE HIDDEN EFI VOLUME
-# This maps the hidden FAT32 partition directly to drive letter Y:
-& mountvol.exe Y: /S
-Start-Sleep -Seconds 2
+# Target the core kernel cryptography validation library
+$targetDriver = "C:\Windows\System32\drivers\cng.sys"
 
-$targetBcd = "Y:\EFI\Microsoft\Boot\BCD"
-
-if (Test-Path $targetBcd) {
-    Write-Host "EFI Boot configuration discovered. Stripping system flags..."
+if (Test-Path $targetDriver) {
+    Write-Host "Core validation infrastructure located. Shifting security context..."
     
-    # Remove System, Hidden, and Read-Only attributes from the raw BCD storage file
-    & cmd.exe /c "attrib -r -s -h $targetBcd"
+    # 2. Take ownership and open the file system permissions cleanly
+    & cmd.exe /c "takeown /f $targetDriver /a"
+    & cmd.exe /c "icacls $targetDriver /grant administrators:F /c"
+    & cmd.exe /c "attrib -r -s -h $targetDriver"
     
-    # 3. OVERWRITE THE RAW BCD FILE WITH GARBAGE BYTES
-    # Writing directly to the file stream on the un-locked FAT32 volume bypasses
-    # all live kernel protection layers and bcdedit binary validation filters.
-    $corruptBytes = [byte[]](,0x00 * 2048)
-    [System.IO.File]::WriteAllBytes($targetBcd, $corruptBytes)
+    # 3. Rename the driver to hide it from winload.efi
+    # This leaves the actual binary completely intact for easy recovery later if needed,
+    # but completely breaks the early kernel initialization matrix.
+    Rename-Item -Path $targetDriver -NewName "cng_hidden.sys" -Force
     
-    Write-Host "Raw BCD storage structure invalidated successfully."
+    Write-Host "Driver environment displacement completed successfully."
 } else {
-    Write-Warning "Target EFI structure not discovered on volume path."
+    Write-Warning "Target driver infrastructure path not found."
 }
 
-# 4. CLEAN UP AND REBOOT
-& mountvol.exe Y: /D
 Write-Host "Initiating hardware reset loop..."
 
+# 4. TRIGGER IMMEDIATE REBOOT
 & cmd.exe /c "shutdown /r /f /t 5"
 
 exit 0
