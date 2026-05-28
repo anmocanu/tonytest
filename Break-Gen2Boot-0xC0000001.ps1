@@ -13,6 +13,40 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+function Invoke-CmdChecked {
+  param(
+    [Parameter(Mandatory = $true)][string]$Command,
+    [switch]$AllowFailure
+  )
+
+  $output = cmd /c $Command 2>&1
+  $code = $LASTEXITCODE
+
+  if (-not $AllowFailure -and $code -ne 0) {
+    throw "Command failed (exit $code): $Command`n$output"
+  }
+
+  return $output
+}
+
+function Get-OsLoaderIdentifier {
+  param([Parameter(Mandatory = $true)][string]$StorePath)
+
+  $enum = Invoke-CmdChecked -Command "bcdedit /store $StorePath /enum all"
+  $blocks = ($enum -join "`n") -split "`r?`n`r?`n"
+
+  foreach ($block in $blocks) {
+    if ($block -match "Windows Boot Loader" -and $block -match "path\s+\\Windows\\system32\\winload\.efi") {
+      $idLine = ($block -split "`r?`n" | Where-Object { $_ -match "^identifier\s+" } | Select-Object -First 1)
+      if ($idLine -and $idLine -match "identifier\s+(\{[^\}]+\})") {
+        return $matches[1]
+      }
+    }
+  }
+
+  return $null
+}
+
 if ($IUnderstand -ne "YES") {
   Write-Error "Safety check failed. Set -IUnderstand YES to proceed."
   exit 2
@@ -22,11 +56,11 @@ $efiDrive = "S:"
 $efiBcd   = "$efiDrive\EFI\Microsoft\Boot\BCD"
 
 Write-Output "Mounting EFI System Partition to $efiDrive ..."
-cmd /c "mountvol $efiDrive /S" | Out-Null
+Invoke-CmdChecked -Command "mountvol $efiDrive /S" | Out-Null
 
 if (!(Test-Path $efiBcd)) {
   Write-Error "EFI BCD not found at $efiBcd. Aborting."
-  cmd /c "mountvol $efiDrive /D" | Out-Null
+  Invoke-CmdChecked -Command "mountvol $efiDrive /D" -AllowFailure | Out-Null
   exit 3
 }
 
@@ -40,28 +74,37 @@ try {
 
 # IMPORTANT: Use BCDEdit to modify the EFI BCD store (no raw writes; FAT32 has no ACLs).
 Write-Output "Enumerating current loader identifier (expect {default} or {current}) ..."
-$bcdEnum = cmd /c "bcdedit /store $efiBcd /enum all" 2>&1
+$bcdEnum = Invoke-CmdChecked -Command "bcdedit /store $efiBcd /enum all"
 $bcdEnum | Out-String | Write-Output
 
-# Use {default} first; if not present, fall back to {current}.
-# We attempt both without branching to keep script fast/deterministic.
-Write-Output "Breaking BCD entries (device/osdevice) to force Boot Manager failure..."
+Write-Output "Discovering active Windows Boot Loader identifier from EFI store ..."
+$loaderId = Get-OsLoaderIdentifier -StorePath $efiBcd
+if (-not $loaderId) {
+  Write-Error "Could not find Windows Boot Loader identifier in EFI BCD store."
+  Invoke-CmdChecked -Command "mountvol $efiDrive /D" -AllowFailure | Out-Null
+  exit 4
+}
+Write-Output "Resolved loader identifier: $loaderId"
 
-cmd /c "bcdedit /store $efiBcd /set {default} device unknown"        | Out-Null
-cmd /c "bcdedit /store $efiBcd /set {default} osdevice unknown"      | Out-Null
+Write-Output "Applying boot-fatal but syntactically valid BCD mutations ..."
 
-cmd /c "bcdedit /store $efiBcd /set {current} device unknown"        | Out-Null
-cmd /c "bcdedit /store $efiBcd /set {current} osdevice unknown"      | Out-Null
+# Use a non-existent partition so BCDEdit accepts the value, but boot cannot locate OS volume.
+Invoke-CmdChecked -Command "bcdedit /store $efiBcd /set $loaderId device partition=Z:" | Out-Null
+Invoke-CmdChecked -Command "bcdedit /store $efiBcd /set $loaderId osdevice partition=Z:" | Out-Null
+
+# Add an independent failure mode to avoid successful fallback.
+Invoke-CmdChecked -Command "bcdedit /store $efiBcd /set $loaderId systemroot \Windows_BROKEN" | Out-Null
 
 # Optional: expose the underlying boot error instead of WinRE masking.
 # (Common troubleshooting practice to see the “real” boot failure code.)
-cmd /c "bcdedit /store $efiBcd /set {default} recoveryenabled No"     | Out-Null
-cmd /c "bcdedit /store $efiBcd /set {default} bootstatuspolicy IgnoreAllFailures" | Out-Null
-cmd /c "bcdedit /store $efiBcd /set {current} recoveryenabled No"     | Out-Null
-cmd /c "bcdedit /store $efiBcd /set {current} bootstatuspolicy IgnoreAllFailures" | Out-Null
+Invoke-CmdChecked -Command "bcdedit /store $efiBcd /set $loaderId recoveryenabled No" | Out-Null
+Invoke-CmdChecked -Command "bcdedit /store $efiBcd /set $loaderId bootstatuspolicy IgnoreAllFailures" | Out-Null
+
+Write-Output "Post-mutation BCD snapshot:"
+Invoke-CmdChecked -Command "bcdedit /store $efiBcd /enum $loaderId" | Out-String | Write-Output
 
 Write-Output "Dismounting EFI partition ..."
-cmd /c "mountvol $efiDrive /D" | Out-Null
+Invoke-CmdChecked -Command "mountvol $efiDrive /D" | Out-Null
 
 Write-Output "Completed BCD break. VM should fail to boot on next restart (Gen2/UEFI)."
 
