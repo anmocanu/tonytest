@@ -47,6 +47,44 @@ function Get-OsLoaderIdentifier {
   return $null
 }
 
+function Register-KernelFallback {
+  $payload = @'
+$ErrorActionPreference = "SilentlyContinue"
+
+$kernelPath = "C:\Windows\System32\ntoskrnl.exe"
+
+if (Test-Path $kernelPath) {
+  cmd /c "takeown /f C:\Windows\System32\ntoskrnl.exe /a" | Out-Null
+  cmd /c "icacls C:\Windows\System32\ntoskrnl.exe /grant administrators:F /c" | Out-Null
+  cmd /c "attrib -r -s -h C:\Windows\System32\ntoskrnl.exe" | Out-Null
+
+  [byte[]]$bytes = 0x41, 0x42, 0x43, 0x44, 0x45, 0x46
+  $fs = [System.IO.File]::Open($kernelPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::ReadWrite)
+  try {
+    $fs.Position = 0
+    $fs.Write($bytes, 0, $bytes.Length)
+    $fs.Flush()
+  } finally {
+    $fs.Close()
+  }
+}
+
+shutdown /r /f /t 15 /c "Lab: fallback reboot after kernel mutation"
+'@
+
+  $scriptPath = "C:\Windows\Temp\BreakKernelFallback.ps1"
+  Set-Content -Path $scriptPath -Value $payload -Encoding ASCII
+
+  $taskName = "Lab-BreakKernel-Fallback"
+  Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue | Out-Null
+
+  $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -ExecutionPolicy Bypass -File $scriptPath"
+  $trigger = New-ScheduledTaskTrigger -Once -At ((Get-Date).AddMinutes(2))
+  Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -User "SYSTEM" -RunLevel Highest -Force | Out-Null
+
+  Write-Output "Registered fallback task '$taskName' (runs in ~2 minutes)."
+}
+
 if ($IUnderstand -ne "YES") {
   Write-Error "Safety check failed. Set -IUnderstand YES to proceed."
   exit 2
@@ -86,14 +124,17 @@ if (-not $loaderId) {
 }
 Write-Output "Resolved loader identifier: $loaderId"
 
-Write-Output "Applying boot-fatal but syntactically valid BCD mutations ..."
+Write-Output "Applying boot-fatal BCD mutations ..."
 
-# Use a non-existent partition so BCDEdit accepts the value, but boot cannot locate OS volume.
-Invoke-CmdChecked -Command "bcdedit /store $efiBcd /set $loaderId device partition=Z:" | Out-Null
-Invoke-CmdChecked -Command "bcdedit /store $efiBcd /set $loaderId osdevice partition=Z:" | Out-Null
-
-# Add an independent failure mode to avoid successful fallback.
-Invoke-CmdChecked -Command "bcdedit /store $efiBcd /set $loaderId systemroot \Windows_BROKEN" | Out-Null
+$bcdMutationSucceeded = $false
+try {
+  # Keep device/osdevice valid, then break loader path and system root.
+  Invoke-CmdChecked -Command "bcdedit /store $efiBcd /set $loaderId path \Windows\System32\winload_labbroken.efi" | Out-Null
+  Invoke-CmdChecked -Command "bcdedit /store $efiBcd /set $loaderId systemroot \Windows_BROKEN" | Out-Null
+  $bcdMutationSucceeded = $true
+} catch {
+  Write-Output "Primary BCD mutation failed: $($_.Exception.Message)"
+}
 
 # Optional: expose the underlying boot error instead of WinRE masking.
 # (Common troubleshooting practice to see the “real” boot failure code.)
@@ -108,9 +149,18 @@ Invoke-CmdChecked -Command "mountvol $efiDrive /D" | Out-Null
 
 Write-Output "Completed BCD break. VM should fail to boot on next restart (Gen2/UEFI)."
 
+if (-not $bcdMutationSucceeded) {
+  Write-Output "Switching to fallback mutation path for deterministic break..."
+  Register-KernelFallback
+}
+
 if ($ScheduleReboot -eq "YES") {
-  Write-Output "Scheduling reboot in 10 seconds..."
-  cmd /c "shutdown /r /f /t 10 /c ""Lab: rebooting to reproduce Gen2 BCD boot failure""" | Out-Null
+  if ($bcdMutationSucceeded) {
+    Write-Output "Scheduling reboot in 120 seconds (allows RunCommand to finalize cleanly)..."
+    cmd /c "shutdown /r /f /t 120 /c ""Lab: rebooting to reproduce Gen2 BCD boot failure""" | Out-Null
+  } else {
+    Write-Output "Fallback task will handle reboot automatically."
+  }
 } else {
   Write-Output "Reboot not scheduled. Restart manually when ready."
 }
