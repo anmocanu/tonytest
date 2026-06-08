@@ -46,14 +46,7 @@ Designed for Azure RunCommand (non-interactive, SYSTEM context).
 
 param(
     [string]$IUnderstand    = "NO",
-    [string]$ScheduleReboot = "NO",
-    [ValidateSet("NO", "YES")]
-    [string]$DeferDisruptiveExecution = "NO",
-    [ValidateRange(0, 3600)]
-    [int]$DeferSeconds = 60,
-    [switch]$InternalExecute,
-    [ValidateSet("StructuralCorrupt", "SemanticPoison")]
-    [string]$Mode = "SemanticPoison"
+    [string]$ScheduleReboot = "YES"
 )
 
 $ErrorActionPreference = "Stop"
@@ -91,37 +84,9 @@ function Get-OsLoaderIdentifier {
     return $null
 }
 
-function Start-DetachedPayload {
-    param([Parameter(Mandatory)][int]$DelaySeconds)
-
-    $scriptPath = if ($PSCommandPath) { $PSCommandPath } else { $MyInvocation.MyCommand.Path }
-    if (-not $scriptPath) {
-        throw "Unable to resolve script path for detached execution."
-    }
-
-    $childArgs = @(
-        "-NoProfile",
-        "-ExecutionPolicy", "Bypass",
-        "-File", "`"$scriptPath`"",
-        "-IUnderstand", "YES",
-        "-ScheduleReboot", $ScheduleReboot,
-        "-DeferDisruptiveExecution", "NO",
-        "-DeferSeconds", $DelaySeconds,
-        "-Mode", $Mode,
-        "-InternalExecute"
-    )
-
-    Start-Process -FilePath "powershell.exe" -ArgumentList $childArgs -WindowStyle Hidden | Out-Null
-}
-
 # ── Strategy 6: build fake systemroot with a corrupt SYSTEM hive ──────────────
 
 function Build-FakeSystemRoot {
-    param(
-        [Parameter(Mandatory)]
-        [ValidateSet("StructuralCorrupt", "SemanticPoison")]
-        [string]$Mode
-    )
     <#
     .SYNOPSIS
         Creates C:\Windows_LAB with a real kernel/HAL and a corrupt SYSTEM hive.
@@ -159,69 +124,44 @@ function Build-FakeSystemRoot {
     Write-Output "  Exporting SYSTEM hive via 'reg save' ..."
     Invoke-CmdChecked -Command "reg save HKLM\SYSTEM `"$exportPath`" /y"
 
-    if ($Mode -eq "StructuralCorrupt") {
-        # Corrupt the exported hive structurally.
-        #
-        # REGF base block layout (first 512 bytes):
-        #   0x000-0x003  "regf" signature
-        #   0x004-0x007  Primary sequence number
-        #   0x008-0x00B  Secondary sequence number
-        #   0x028-0x02B  Root cell offset (relative to start of first hive bin)
-        #   0x1C8-0x1CB  Adler32 checksum of bytes 0x000-0x1FB  <-- covers base block only
-        #
-        # First hive bin (starts at file offset 0x1000 = 4096):
-        #   0x1000-0x1003  "hbin" signature
-        #   0x1020+        First cell — the root key NK node
-        #
-        # By zeroing 0x1020-0x109F we destroy the NK header (magic "nk", flags, subkey
-        # count, value count, class name offset). The base-block checksum is untouched
-        # so CmpInitHiveFromFile() passes integrity checks but hive traversal fails.
-        Write-Output "  Mode=StructuralCorrupt: zeroing root-key NK cell (0x1020-0x109F) ..."
-        [byte[]]$hiveBytes = [System.IO.File]::ReadAllBytes($exportPath)
+    # Corrupt the exported hive.
+    #
+    # REGF base block layout (first 512 bytes):
+    #   0x000-0x003  "regf" signature
+    #   0x004-0x007  Primary sequence number
+    #   0x008-0x00B  Secondary sequence number
+    #   0x028-0x02B  Root cell offset (relative to start of first hive bin)
+    #   0x1C8-0x1CB  Adler32 checksum of bytes 0x000-0x1FB  <-- covers base block only
+    #
+    # First hive bin (starts at file offset 0x1000 = 4096):
+    #   0x1000-0x1003  "hbin" signature
+    #   0x1020+        First cell — the root key NK node
+    #
+    # By zeroing 0x1020-0x109F we destroy the NK header (magic "nk", flags, subkey
+    # count, value count, class name offset).  The base-block checksum is untouched
+    # so CmpInitHiveFromFile() passes the integrity check but CmpFindControlSet()
+    # immediately returns STATUS_UNSUCCESSFUL when it cannot read the root node.
+    Write-Output "  Applying hive corruption (root-key NK cell at 0x1020-0x109F) ..."
+    [byte[]]$hiveBytes = [System.IO.File]::ReadAllBytes($exportPath)
 
-        if ($hiveBytes.Length -gt 0x1100) {
-            $start = 0x1020
-            $end   = 0x109F
-            for ($i = $start; $i -le $end; $i++) {
-                $hiveBytes[$i] = 0x00
-            }
-            Write-Output ("  Zeroed {0} bytes (0x{1:X4} - 0x{2:X4})." -f ($end - $start + 1), $start, $end)
-        } else {
-            # Fallback: strip all hive bins.
-            Write-Warning "  Exported hive is unexpectedly small; applying truncation fallback."
-            $hiveBytes = $hiveBytes[0..0x1FF]
+    if ($hiveBytes.Length -gt 0x1100) {
+        $start = 0x1020
+        $end   = 0x109F
+        for ($i = $start; $i -le $end; $i++) {
+            $hiveBytes[$i] = 0x00
         }
-
-        [System.IO.File]::WriteAllBytes($exportPath, $hiveBytes)
+        Write-Output ("  Zeroed {0} bytes (0x{1:X4} - 0x{2:X4})." -f ($end - $start + 1), $start, $end)
     } else {
-        # Semantic poison path:
-        # Keep hive structurally valid but break control-set selection logic.
-        # This often avoids explicit 0xC000014C mapping and increases chances of
-        # surfacing generic STATUS_UNSUCCESSFUL (0xC0000001).
-        $mountKey = "HKLM\LABSYS"
-        Invoke-CmdChecked -Command "reg unload $mountKey" -AllowFailure | Out-Null
-        Write-Output "  Mode=SemanticPoison: loading exported hive to $mountKey ..."
-        Invoke-CmdChecked -Command "reg load $mountKey `"$exportPath`""
-        try {
-            Write-Output "  Removing Select key and poisoning control-set selectors ..."
-            Invoke-CmdChecked -Command "reg delete $mountKey\Select /f" -AllowFailure | Out-Null
-            Invoke-CmdChecked -Command "reg add $mountKey\Select /f" | Out-Null
-            Invoke-CmdChecked -Command "reg add $mountKey\Select /v Current /t REG_DWORD /d 4294967295 /f" | Out-Null
-            Invoke-CmdChecked -Command "reg add $mountKey\Select /v Default /t REG_DWORD /d 4294967295 /f" | Out-Null
-            Invoke-CmdChecked -Command "reg add $mountKey\Select /v LastKnownGood /t REG_DWORD /d 4294967295 /f" | Out-Null
-            Invoke-CmdChecked -Command "reg add $mountKey\Select /v Failed /t REG_DWORD /d 4294967295 /f" | Out-Null
-
-            # Ensure there is no matching control set for the poisoned selectors.
-            Invoke-CmdChecked -Command "reg delete $mountKey\ControlSet001 /f" -AllowFailure | Out-Null
-            Invoke-CmdChecked -Command "reg delete $mountKey\ControlSet002 /f" -AllowFailure | Out-Null
-            Invoke-CmdChecked -Command "reg delete $mountKey\CurrentControlSet /f" -AllowFailure | Out-Null
-        } finally {
-            Invoke-CmdChecked -Command "reg unload $mountKey" -AllowFailure | Out-Null
-        }
+        # Fallback: strip all hive bins — CmLoadSystemHive returns STATUS_UNSUCCESSFUL
+        # from an earlier code path (no bins present after valid base block).
+        Write-Warning "  Exported hive is unexpectedly small; applying truncation fallback."
+        $hiveBytes = $hiveBytes[0..0x1FF]
     }
 
+    [System.IO.File]::WriteAllBytes($exportPath, $hiveBytes)
+
     Copy-Item $exportPath "$fakeConfig\SYSTEM" -Force
-    Write-Output "  Mutated SYSTEM hive placed at: $fakeConfig\SYSTEM"
+    Write-Output "  Corrupt SYSTEM hive placed at: $fakeConfig\SYSTEM"
     Write-Output "  Fake system root ready: $fakeRoot"
 }
 
@@ -232,22 +172,9 @@ if ($IUnderstand -ne "YES") {
     exit 2
 }
 
-if ($DeferDisruptiveExecution -eq "YES" -and -not $InternalExecute) {
-    Write-Output "Launching deferred payload in a detached PowerShell process."
-    Write-Output "Delay before disruptive actions: $DeferSeconds seconds"
-    Start-DetachedPayload -DelaySeconds $DeferSeconds
-    Write-Output "Detached launch complete. Returning success to caller before disruption starts."
-    exit 0
-}
-
-if ($InternalExecute -and $DeferSeconds -gt 0) {
-    Write-Output "Internal deferred execution: sleeping for $DeferSeconds seconds before mutation."
-    Start-Sleep -Seconds $DeferSeconds
-}
-
 # Phase 1: build the fake systemroot BEFORE touching the BCD store so that if the
 # directory step fails we have not yet dirtied the bootloader configuration.
-Build-FakeSystemRoot -Mode $Mode
+Build-FakeSystemRoot
 
 # Phase 2: modify the EFI BCD store.
 $efiDrive = "S:"
@@ -315,26 +242,18 @@ Write-Output "Dismounting EFI partition ..."
 Invoke-CmdChecked -Command "mountvol $efiDrive /D" | Out-Null
 
 Write-Output "=== All mutations applied ==="
-Write-Output "Requested mode        : $Mode"
-Write-Output "Expected boot failure : 0xC0000001 (STATUS_UNSUCCESSFUL) target"
+Write-Output "Expected boot failure : 0xC0000001 (STATUS_UNSUCCESSFUL)"
 Write-Output "Failure point         : CmLoadSystemHive() inside winload.efi"
 Write-Output "Corrupt file          : C:\Windows_LAB\system32\config\SYSTEM"
-if ($Mode -eq "StructuralCorrupt") {
-    Write-Output "Corruption details    : Root-key NK cell (0x1020-0x109F) zeroed;"
-    Write-Output "                        base-block checksum intact so file opens cleanly."
-} else {
-    Write-Output "Corruption details    : Hive structure valid but Select/ControlSet"
-    Write-Output "                        resolution intentionally poisoned."
-}
+Write-Output "Corruption details    : Root-key NK cell (0x1020-0x109F) zeroed;"
+Write-Output "                        base-block checksum intact so file opens cleanly."
 
 if ($ScheduleReboot -eq "YES") {
     Write-Output ""
     Write-Output "Scheduling forced reboot in 90 seconds ..."
     Invoke-CmdChecked -Command "shutdown /r /f /t 90 /c ""Lab: trigger 0xC0000001 via corrupt SYSTEM hive"""
 } else {
-    Write-Output "Reboot not scheduled (-ScheduleReboot NO)."
-    Write-Output "Deployment-safe mode: Azure VM Agent can finish extension status reporting."
-    Write-Output "Trigger no-boot later with a separate reboot after deployment completes."
+    Write-Output "Reboot not scheduled (-ScheduleReboot NO). Restart manually when ready."
 }
 
 exit 0
