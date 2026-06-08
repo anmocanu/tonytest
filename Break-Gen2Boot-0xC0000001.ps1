@@ -46,7 +46,12 @@ Designed for Azure RunCommand (non-interactive, SYSTEM context).
 
 param(
     [string]$IUnderstand    = "NO",
-    [string]$ScheduleReboot = "YES",
+    [string]$ScheduleReboot = "NO",
+    [ValidateSet("NO", "YES")]
+    [string]$DeferDisruptiveExecution = "NO",
+    [ValidateRange(0, 3600)]
+    [int]$DeferSeconds = 60,
+    [switch]$InternalExecute,
     [ValidateSet("StructuralCorrupt", "SemanticPoison")]
     [string]$Mode = "SemanticPoison"
 )
@@ -84,6 +89,29 @@ function Get-OsLoaderIdentifier {
         }
     }
     return $null
+}
+
+function Start-DetachedPayload {
+    param([Parameter(Mandatory)][int]$DelaySeconds)
+
+    $scriptPath = if ($PSCommandPath) { $PSCommandPath } else { $MyInvocation.MyCommand.Path }
+    if (-not $scriptPath) {
+        throw "Unable to resolve script path for detached execution."
+    }
+
+    $childArgs = @(
+        "-NoProfile",
+        "-ExecutionPolicy", "Bypass",
+        "-File", "`"$scriptPath`"",
+        "-IUnderstand", "YES",
+        "-ScheduleReboot", $ScheduleReboot,
+        "-DeferDisruptiveExecution", "NO",
+        "-DeferSeconds", $DelaySeconds,
+        "-Mode", $Mode,
+        "-InternalExecute"
+    )
+
+    Start-Process -FilePath "powershell.exe" -ArgumentList $childArgs -WindowStyle Hidden | Out-Null
 }
 
 # ── Strategy 6: build fake systemroot with a corrupt SYSTEM hive ──────────────
@@ -204,6 +232,19 @@ if ($IUnderstand -ne "YES") {
     exit 2
 }
 
+if ($DeferDisruptiveExecution -eq "YES" -and -not $InternalExecute) {
+    Write-Output "Launching deferred payload in a detached PowerShell process."
+    Write-Output "Delay before disruptive actions: $DeferSeconds seconds"
+    Start-DetachedPayload -DelaySeconds $DeferSeconds
+    Write-Output "Detached launch complete. Returning success to caller before disruption starts."
+    exit 0
+}
+
+if ($InternalExecute -and $DeferSeconds -gt 0) {
+    Write-Output "Internal deferred execution: sleeping for $DeferSeconds seconds before mutation."
+    Start-Sleep -Seconds $DeferSeconds
+}
+
 # Phase 1: build the fake systemroot BEFORE touching the BCD store so that if the
 # directory step fails we have not yet dirtied the bootloader configuration.
 Build-FakeSystemRoot -Mode $Mode
@@ -291,7 +332,9 @@ if ($ScheduleReboot -eq "YES") {
     Write-Output "Scheduling forced reboot in 90 seconds ..."
     Invoke-CmdChecked -Command "shutdown /r /f /t 90 /c ""Lab: trigger 0xC0000001 via corrupt SYSTEM hive"""
 } else {
-    Write-Output "Reboot not scheduled (-ScheduleReboot NO). Restart manually when ready."
+    Write-Output "Reboot not scheduled (-ScheduleReboot NO)."
+    Write-Output "Deployment-safe mode: Azure VM Agent can finish extension status reporting."
+    Write-Output "Trigger no-boot later with a separate reboot after deployment completes."
 }
 
 exit 0
