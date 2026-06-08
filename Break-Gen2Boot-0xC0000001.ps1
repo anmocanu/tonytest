@@ -1,168 +1,259 @@
 <#
-Break-Gen2Boot-0xC0000001-BCDEdit.ps1
+Break-Gen2Boot-0xC0000001.ps1
 
 Purpose:
-- Gen2/UEFI: break boot via EFI BCD store edits (no ACL/takeown; no raw file writes)
-- Designed for Azure RunCommand (fast + deterministic)
+    Gen2/UEFI: reliably produce 0xC0000001 (STATUS_UNSUCCESSFUL) on Windows Server 2025
+    by redirecting the BCD 'systemroot' to a fake Windows directory containing a real
+    kernel image alongside an internally-corrupt SYSTEM registry hive.
+
+Strategy 6 — Fake SystemRoot + SYSTEM Hive Cell Corruption
+-----------------------------------------------------------
+winload.efi loads OS files in this order:
+    1. Locate OS volume via BCD 'osdevice'                -> success (untouched)
+    2. Load ntoskrnl.exe from <systemroot>\system32\      -> success (real binary copied)
+    3. Load hal.dll from <systemroot>\system32\           -> success (real binary copied)
+    4. Load SYSTEM hive from <systemroot>\system32\config\SYSTEM
+       -> FAILS with STATUS_UNSUCCESSFUL (0xC0000001)
+
+    REGF hive format detail:
+        Offset 0x000-0x1FB  : Base block. Adler32 checksum covers ONLY these bytes.
+        Offset 0x1000       : First hive bin ("hbin" magic).
+        Offset 0x1020       : First cell in first bin = root key NK node.
+    Zeroing bytes 0x1020-0x109F leaves the file openable ("regf" magic + checksum
+    both intact) but destroys the root-key cell, causing CmLoadSystemHive() inside
+    winload.efi to return STATUS_UNSUCCESSFUL.
+
+Why previous strategies failed:
+    1. BCD path / ramdisk / EMS mutations     -> bcdedit parser rejected unknown tokens;
+                                                 Azure RunCommand strips {} GUID tokens.
+    2. Live registry key injection             -> VBS + Last Known Good Config revert
+                                                 silently undoes changes on forced reboot.
+    3. AppInit_DLLs hooking                   -> Ignored for IMAGE_DLLCHARACTERISTICS_
+                                                 FORCE_INTEGRITY code-signed binaries.
+    4. FileStream / BinaryWriter on hive/BCD  -> NT object manager exclusive oplock;
+                                                 FileShare.ReadWrite still denied (0x80070005).
+    5. Magic byte flip of winload.efi         -> Boot Manager flags STATUS_INVALID_IMAGE_
+                                                 FORMAT (0xC000007B), not 0xC0000001.
+
+Defense bypass employed here:
+    - BCD 'systemroot' is NOT validated by Secure Boot or VBS at write time.
+    - We create a NEW directory; no protected path is touched.
+    - The fake SYSTEM hive is built from 'reg save' (registry API export, no file lock).
+    - WinRE is disabled at BOTH the loader and bootmgr BCD levels before reboot.
+
+Designed for Azure RunCommand (non-interactive, SYSTEM context).
 #>
 
 param(
-  [string]$IUnderstand = "NO",
-  [string]$ScheduleReboot = "YES"
+    [string]$IUnderstand    = "NO",
+    [string]$ScheduleReboot = "YES"
 )
 
 $ErrorActionPreference = "Stop"
 
+# ── helpers ────────────────────────────────────────────────────────────────────
+
 function Invoke-CmdChecked {
-  param(
-    [Parameter(Mandatory = $true)][string]$Command,
-    [switch]$AllowFailure
-  )
-
-  $output = cmd /c $Command 2>&1
-  $code = $LASTEXITCODE
-
-  if (-not $AllowFailure -and $code -ne 0) {
-    throw "Command failed (exit $code): $Command`n$output"
-  }
-
-  return $output
+    param(
+        [Parameter(Mandatory)][string]$Command,
+        [switch]$AllowFailure
+    )
+    $out  = cmd /c $Command 2>&1
+    $code = $LASTEXITCODE
+    if (-not $AllowFailure -and $code -ne 0) {
+        throw "Command failed (exit $code): $Command`n$out"
+    }
+    return $out
 }
 
 function Get-OsLoaderIdentifier {
-  param([Parameter(Mandatory = $true)][string]$StorePath)
-
-  $enum = Invoke-CmdChecked -Command "bcdedit /store $StorePath /enum all"
-  $blocks = ($enum -join "`n") -split "`r?`n`r?`n"
-
-  foreach ($block in $blocks) {
-    if ($block -match "Windows Boot Loader" -and $block -match "path\s+\\Windows\\system32\\winload\.efi") {
-      $idLine = ($block -split "`r?`n" | Where-Object { $_ -match "^identifier\s+" } | Select-Object -First 1)
-      if ($idLine -and $idLine -match "identifier\s+(\{[^\}]+\})") {
-        return $matches[1]
-      }
+    param([Parameter(Mandatory)][string]$StorePath)
+    $enum   = Invoke-CmdChecked -Command "bcdedit /store $StorePath /enum all"
+    $blocks = ($enum -join "`n") -split "`r?`n`r?`n"
+    foreach ($block in $blocks) {
+        if ($block -match "Windows Boot Loader" -and
+            $block -match "path\s+\\Windows\\system32\\winload\.efi") {
+            $idLine = ($block -split "`r?`n" |
+                       Where-Object { $_ -match "^identifier\s+" } |
+                       Select-Object -First 1)
+            if ($idLine -and $idLine -match "identifier\s+(\{[^\}]+\})") {
+                return $matches[1]
+            }
+        }
     }
-  }
-
-  return $null
+    return $null
 }
 
-function Register-KernelFallback {
-  $payload = @'
-$ErrorActionPreference = "SilentlyContinue"
+# ── Strategy 6: build fake systemroot with a corrupt SYSTEM hive ──────────────
 
-$kernelPath = "C:\Windows\System32\ntoskrnl.exe"
+function Build-FakeSystemRoot {
+    <#
+    .SYNOPSIS
+        Creates C:\Windows_LAB with a real kernel/HAL and a corrupt SYSTEM hive.
+    .NOTES
+        winload.efi reads the SYSTEM hive BEFORE enumerating boot drivers, so the
+        failure occurs at hive-init time regardless of what drivers are present.
+        Minimum required files in the fake tree:
+            \system32\ntoskrnl.exe   (real — winload.efi must clear image-load phase)
+            \system32\hal.dll        (real — winload.efi must clear image-load phase)
+            \system32\config\SYSTEM  (corrupt — triggers STATUS_UNSUCCESSFUL)
+    #>
+    Write-Output ""
+    Write-Output "=== Phase 1: Building fake system root (C:\Windows_LAB) ==="
 
-if (Test-Path $kernelPath) {
-  cmd /c "takeown /f C:\Windows\System32\ntoskrnl.exe /a" | Out-Null
-  cmd /c "icacls C:\Windows\System32\ntoskrnl.exe /grant administrators:F /c" | Out-Null
-  cmd /c "attrib -r -s -h C:\Windows\System32\ntoskrnl.exe" | Out-Null
+    $fakeRoot   = "C:\Windows_LAB"
+    $fakeSys32  = "$fakeRoot\system32"
+    $fakeConfig = "$fakeSys32\config"
 
-  [byte[]]$bytes = 0x41, 0x42, 0x43, 0x44, 0x45, 0x46
-  $fs = [System.IO.File]::Open($kernelPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::ReadWrite)
-  try {
-    $fs.Position = 0
-    $fs.Write($bytes, 0, $bytes.Length)
-    $fs.Flush()
-  } finally {
-    $fs.Close()
-  }
+    foreach ($dir in @($fakeSys32, $fakeConfig)) {
+        if (-not (Test-Path $dir)) {
+            New-Item -Path $dir -ItemType Directory -Force | Out-Null
+        }
+    }
+
+    # Copy the real kernel and HAL so winload.efi clears load steps 2 and 3.
+    Write-Output "  Copying ntoskrnl.exe and hal.dll ..."
+    Copy-Item "C:\Windows\System32\ntoskrnl.exe" "$fakeSys32\ntoskrnl.exe" -Force
+    Copy-Item "C:\Windows\System32\hal.dll"      "$fakeSys32\hal.dll"      -Force
+
+    # Export the live SYSTEM hive via the registry API.
+    # 'reg save' reads the in-memory hive image through the NT registry manager,
+    # bypassing the kernel-level file lock on the raw .hiv file on disk.
+    $exportPath = "C:\Windows\Temp\SYSTEM_LAB_export.hiv"
+    if (Test-Path $exportPath) { Remove-Item $exportPath -Force }
+    Write-Output "  Exporting SYSTEM hive via 'reg save' ..."
+    Invoke-CmdChecked -Command "reg save HKLM\SYSTEM `"$exportPath`" /y"
+
+    # Corrupt the exported hive.
+    #
+    # REGF base block layout (first 512 bytes):
+    #   0x000-0x003  "regf" signature
+    #   0x004-0x007  Primary sequence number
+    #   0x008-0x00B  Secondary sequence number
+    #   0x028-0x02B  Root cell offset (relative to start of first hive bin)
+    #   0x1C8-0x1CB  Adler32 checksum of bytes 0x000-0x1FB  <-- covers base block only
+    #
+    # First hive bin (starts at file offset 0x1000 = 4096):
+    #   0x1000-0x1003  "hbin" signature
+    #   0x1020+        First cell — the root key NK node
+    #
+    # By zeroing 0x1020-0x109F we destroy the NK header (magic "nk", flags, subkey
+    # count, value count, class name offset).  The base-block checksum is untouched
+    # so CmpInitHiveFromFile() passes the integrity check but CmpFindControlSet()
+    # immediately returns STATUS_UNSUCCESSFUL when it cannot read the root node.
+    Write-Output "  Applying hive corruption (root-key NK cell at 0x1020-0x109F) ..."
+    [byte[]]$hiveBytes = [System.IO.File]::ReadAllBytes($exportPath)
+
+    if ($hiveBytes.Length -gt 0x1100) {
+        $start = 0x1020
+        $end   = 0x109F
+        for ($i = $start; $i -le $end; $i++) {
+            $hiveBytes[$i] = 0x00
+        }
+        Write-Output ("  Zeroed {0} bytes (0x{1:X4} - 0x{2:X4})." -f ($end - $start + 1), $start, $end)
+    } else {
+        # Fallback: strip all hive bins — CmLoadSystemHive returns STATUS_UNSUCCESSFUL
+        # from an earlier code path (no bins present after valid base block).
+        Write-Warning "  Exported hive is unexpectedly small; applying truncation fallback."
+        $hiveBytes = $hiveBytes[0..0x1FF]
+    }
+
+    [System.IO.File]::WriteAllBytes($exportPath, $hiveBytes)
+
+    Copy-Item $exportPath "$fakeConfig\SYSTEM" -Force
+    Write-Output "  Corrupt SYSTEM hive placed at: $fakeConfig\SYSTEM"
+    Write-Output "  Fake system root ready: $fakeRoot"
 }
 
-shutdown /r /f /t 15 /c "Lab: fallback reboot after kernel mutation"
-'@
-
-  $scriptPath = "C:\Windows\Temp\BreakKernelFallback.ps1"
-  Set-Content -Path $scriptPath -Value $payload -Encoding ASCII
-
-  $taskName = "Lab-BreakKernel-Fallback"
-  Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue | Out-Null
-
-  $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -ExecutionPolicy Bypass -File $scriptPath"
-  $trigger = New-ScheduledTaskTrigger -Once -At ((Get-Date).AddMinutes(2))
-  Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -User "SYSTEM" -RunLevel Highest -Force | Out-Null
-
-  Write-Output "Registered fallback task '$taskName' (runs in ~2 minutes)."
-}
+# ── main ───────────────────────────────────────────────────────────────────────
 
 if ($IUnderstand -ne "YES") {
-  Write-Error "Safety check failed. Set -IUnderstand YES to proceed."
-  exit 2
+    Write-Error "Safety check failed. Set -IUnderstand YES to proceed."
+    exit 2
 }
 
+# Phase 1: build the fake systemroot BEFORE touching the BCD store so that if the
+# directory step fails we have not yet dirtied the bootloader configuration.
+Build-FakeSystemRoot
+
+# Phase 2: modify the EFI BCD store.
 $efiDrive = "S:"
 $efiBcd   = "$efiDrive\EFI\Microsoft\Boot\BCD"
+
+Write-Output ""
+Write-Output "=== Phase 2: EFI BCD mutations ==="
 
 Write-Output "Mounting EFI System Partition to $efiDrive ..."
 Invoke-CmdChecked -Command "mountvol $efiDrive /S" | Out-Null
 
 if (!(Test-Path $efiBcd)) {
-  Write-Error "EFI BCD not found at $efiBcd. Aborting."
-  Invoke-CmdChecked -Command "mountvol $efiDrive /D" -AllowFailure | Out-Null
-  exit 3
+    Write-Error "EFI BCD not found at $efiBcd. Aborting."
+    Invoke-CmdChecked -Command "mountvol $efiDrive /D" -AllowFailure | Out-Null
+    exit 3
 }
 
-Write-Output "Backing up EFI BCD (best effort) ..."
+Write-Output "Backing up EFI BCD ..."
 try {
-  Copy-Item -Path $efiBcd -Destination "$efiBcd.bak" -Force
-  Write-Output "Backup created: $efiBcd.bak"
+    Copy-Item -Path $efiBcd -Destination "$efiBcd.bak" -Force
+    Write-Output "  Backup: $efiBcd.bak"
 } catch {
-  Write-Output "Backup copy failed (continuing): $($_.Exception.Message)"
+    Write-Output "  Backup failed (non-fatal): $($_.Exception.Message)"
 }
 
-# IMPORTANT: Use BCDEdit to modify the EFI BCD store (no raw writes; FAT32 has no ACLs).
-Write-Output "Enumerating current loader identifier (expect {default} or {current}) ..."
-$bcdEnum = Invoke-CmdChecked -Command "bcdedit /store $efiBcd /enum all"
-$bcdEnum | Out-String | Write-Output
-
-Write-Output "Discovering active Windows Boot Loader identifier from EFI store ..."
+Write-Output "Resolving active OS loader identifier ..."
 $loaderId = Get-OsLoaderIdentifier -StorePath $efiBcd
 if (-not $loaderId) {
-  Write-Error "Could not find Windows Boot Loader identifier in EFI BCD store."
-  Invoke-CmdChecked -Command "mountvol $efiDrive /D" -AllowFailure | Out-Null
-  exit 4
+    Write-Error "Could not find Windows Boot Loader entry in EFI BCD store."
+    Invoke-CmdChecked -Command "mountvol $efiDrive /D" -AllowFailure | Out-Null
+    exit 4
 }
-Write-Output "Resolved loader identifier: $loaderId"
+Write-Output "  Loader ID: $loaderId"
 
-Write-Output "Applying boot-fatal BCD mutations ..."
+# Redirect systemroot to our fake directory.
+# winload.efi loads ntoskrnl.exe + hal.dll from \Windows_LAB\system32\ (succeeds),
+# then attempts to load the SYSTEM hive from \Windows_LAB\system32\config\SYSTEM
+# (fails -> CmLoadSystemHive returns STATUS_UNSUCCESSFUL -> boot screen: 0xC0000001).
+Invoke-CmdChecked -Command "bcdedit /store $efiBcd /set $loaderId systemroot \Windows_LAB"
+Write-Output "  systemroot           -> \Windows_LAB"
 
-$bcdMutationSucceeded = $false
-try {
-  # Keep device/osdevice valid, then break loader path and system root.
-  Invoke-CmdChecked -Command "bcdedit /store $efiBcd /set $loaderId path \Windows\System32\winload_labbroken.efi" | Out-Null
-  Invoke-CmdChecked -Command "bcdedit /store $efiBcd /set $loaderId systemroot \Windows_BROKEN" | Out-Null
-  $bcdMutationSucceeded = $true
-} catch {
-  Write-Output "Primary BCD mutation failed: $($_.Exception.Message)"
-}
+# Keep winload.efi path pointing at the real EFI binary so Boot Manager finds it.
+Invoke-CmdChecked -Command "bcdedit /store $efiBcd /set $loaderId path \Windows\System32\winload.efi"
+Write-Output "  path                 -> \Windows\System32\winload.efi (unchanged)"
 
-# Optional: expose the underlying boot error instead of WinRE masking.
-# (Common troubleshooting practice to see the “real” boot failure code.)
-Invoke-CmdChecked -Command "bcdedit /store $efiBcd /set $loaderId recoveryenabled No" | Out-Null
-Invoke-CmdChecked -Command "bcdedit /store $efiBcd /set $loaderId bootstatuspolicy IgnoreAllFailures" | Out-Null
+# Disable loader-level WinRE so the raw STATUS_UNSUCCESSFUL is rendered on screen
+# rather than being silently swallowed by Startup Repair.
+Invoke-CmdChecked -Command "bcdedit /store $efiBcd /set $loaderId recoveryenabled No"
+Invoke-CmdChecked -Command "bcdedit /store $efiBcd /set $loaderId bootstatuspolicy IgnoreAllFailures"
+Write-Output "  recoveryenabled      -> No"
+Write-Output "  bootstatuspolicy     -> IgnoreAllFailures"
 
+# Disable bootmgr-level automatic repair.
+# WS2025 has a second recovery gate at the Boot Manager layer that can intercept
+# loader failures before winload.efi renders the error code to the screen.
+Invoke-CmdChecked -Command "bcdedit /store $efiBcd /set {bootmgr} recoveryenabled No" -AllowFailure | Out-Null
+Invoke-CmdChecked -Command "bcdedit /store $efiBcd /set {bootmgr} displaybootmenu No" -AllowFailure | Out-Null
+Write-Output "  {bootmgr} recoveryenabled -> No  (suppresses pre-loader Startup Repair)"
+
+Write-Output ""
 Write-Output "Post-mutation BCD snapshot:"
 Invoke-CmdChecked -Command "bcdedit /store $efiBcd /enum $loaderId" | Out-String | Write-Output
 
 Write-Output "Dismounting EFI partition ..."
 Invoke-CmdChecked -Command "mountvol $efiDrive /D" | Out-Null
 
-Write-Output "Completed BCD break. VM should fail to boot on next restart (Gen2/UEFI)."
-
-if (-not $bcdMutationSucceeded) {
-  Write-Output "Switching to fallback mutation path for deterministic break..."
-  Register-KernelFallback
-}
+Write-Output "=== All mutations applied ==="
+Write-Output "Expected boot failure : 0xC0000001 (STATUS_UNSUCCESSFUL)"
+Write-Output "Failure point         : CmLoadSystemHive() inside winload.efi"
+Write-Output "Corrupt file          : C:\Windows_LAB\system32\config\SYSTEM"
+Write-Output "Corruption details    : Root-key NK cell (0x1020-0x109F) zeroed;"
+Write-Output "                        base-block checksum intact so file opens cleanly."
 
 if ($ScheduleReboot -eq "YES") {
-  if ($bcdMutationSucceeded) {
-    Write-Output "Scheduling reboot in 120 seconds (allows RunCommand to finalize cleanly)..."
-    cmd /c "shutdown /r /f /t 120 /c ""Lab: rebooting to reproduce Gen2 BCD boot failure""" | Out-Null
-  } else {
-    Write-Output "Fallback task will handle reboot automatically."
-  }
+    Write-Output ""
+    Write-Output "Scheduling forced reboot in 90 seconds ..."
+    Invoke-CmdChecked -Command "shutdown /r /f /t 90 /c ""Lab: trigger 0xC0000001 via corrupt SYSTEM hive"""
 } else {
-  Write-Output "Reboot not scheduled. Restart manually when ready."
+    Write-Output "Reboot not scheduled (-ScheduleReboot NO). Restart manually when ready."
 }
 
 exit 0
