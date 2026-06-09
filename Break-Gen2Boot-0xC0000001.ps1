@@ -372,6 +372,32 @@ function Invoke-KernelTamperBreak {
     $taskName = "Lab-0xC0000001-KernelTamper"
     $payloadPath = "C:\Windows\Temp\KernelTamperBreak.ps1"
     $payloadLogPath = "C:\Windows\Temp\KernelTamperBreak.log"
+    $labKernelName = "ntoskrnl_lab_bad.exe"
+
+    # Force all discovered loader entries to use the dedicated lab kernel file.
+    Write-Output ""
+    Write-Output "  Applying kernel override for lab target file ..."
+    Invoke-CmdChecked -Command "mountvol $efiDrive /S" | Out-Null
+    try {
+        if (Test-Path $efiBcd) {
+            $loaderIds = Get-OsLoaderIdentifiers -StorePath $efiBcd
+            if ($loaderIds -and $loaderIds.Count -gt 0) {
+                foreach ($loaderId in $loaderIds) {
+                    Invoke-CmdChecked -Command "bcdedit /store $efiBcd /set $loaderId kernel $labKernelName" -AllowFailure | Out-Null
+                    Invoke-CmdChecked -Command "bcdedit /store $efiBcd /set $loaderId recoveryenabled No" -AllowFailure | Out-Null
+                    Invoke-CmdChecked -Command "bcdedit /store $efiBcd /set $loaderId bootstatuspolicy IgnoreAllFailures" -AllowFailure | Out-Null
+                }
+                Write-Output "  Kernel override applied : $labKernelName"
+                Write-Output ""
+                Write-Output "  Post-override osloader snapshot:"
+                Invoke-CmdChecked -Command "bcdedit /store $efiBcd /enum osloader" -AllowFailure | Out-String | Write-Output
+            } else {
+                Write-Warning "Could not resolve OS loaders for kernel override; continuing."
+            }
+        }
+    } finally {
+        Invoke-CmdChecked -Command "mountvol $efiDrive /D" -AllowFailure | Out-Null
+    }
 
     $payload = @'
 $ErrorActionPreference = "Stop"
@@ -387,20 +413,24 @@ Write-Log "Payload start."
 Start-Sleep -Seconds 30
 
 $kernelPath = "C:\Windows\System32\ntoskrnl.exe"
+$labKernelPath = "C:\Windows\System32\ntoskrnl_lab_bad.exe"
 
 try {
     if (-not (Test-Path $kernelPath)) {
         throw "Kernel path not found: $kernelPath"
     }
 
-    Write-Log "Taking ownership and ACL grant on ntoskrnl.exe."
-    & cmd.exe /c "takeown /f $kernelPath /a" | Out-Null
-    & cmd.exe /c "icacls $kernelPath /grant administrators:F /c" | Out-Null
-    & cmd.exe /c "attrib -r -s -h $kernelPath" | Out-Null
+    Write-Log "Creating dedicated lab kernel copy."
+    Copy-Item -Path $kernelPath -Destination $labKernelPath -Force
+
+    Write-Log "Taking ownership and ACL grant on lab kernel file."
+    & cmd.exe /c "takeown /f $labKernelPath /a" | Out-Null
+    & cmd.exe /c "icacls $labKernelPath /grant administrators:F /c" | Out-Null
+    & cmd.exe /c "attrib -r -s -h $labKernelPath" | Out-Null
 
     [byte[]]$corruptBytes = 0x41, 0x42, 0x43, 0x44, 0x45, 0x46
-    Write-Log "Attempting write to kernel header."
-    $stream = [System.IO.File]::Open($kernelPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::Read)
+    Write-Log "Attempting write to lab kernel header."
+    $stream = [System.IO.File]::Open($labKernelPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::Read)
     try {
         $stream.Seek(0, [System.IO.SeekOrigin]::Begin) | Out-Null
         $stream.Write($corruptBytes, 0, $corruptBytes.Length)
@@ -410,7 +440,7 @@ try {
     }
 
     Write-Log "Verifying written bytes."
-    [byte[]]$verify = [System.IO.File]::ReadAllBytes($kernelPath)[0..5]
+    [byte[]]$verify = [System.IO.File]::ReadAllBytes($labKernelPath)[0..5]
     $ok = $true
     for ($i = 0; $i -lt 6; $i++) {
         if ($verify[$i] -ne $corruptBytes[$i]) { $ok = $false; break }
