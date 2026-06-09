@@ -48,7 +48,7 @@ param(
     [string]$IUnderstand    = "NO",
     [string]$ScheduleReboot = "YES",
     [ValidateSet("StructuralCorrupt", "SemanticPoison", "SemanticPoisonStrict", "KernelTamper")]
-    [string]$Mode = "SemanticPoisonStrict"
+    [string]$Mode = "KernelTamper"
 )
 
 $ErrorActionPreference = "Stop"

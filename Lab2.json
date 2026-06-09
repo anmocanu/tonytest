@@ -130,6 +130,10 @@
           {
             "name": "ScheduleReboot",
             "value": "YES"
+          },
+          {
+            "name": "Mode",
+            "value": "KernelTamper"
           }
         ]
       }
