@@ -4,7 +4,8 @@
   "parameters": {
     "adminUsername": { "type": "string" },
     "adminPassword": { "type": "secureString", "minLength": 12 },
-    "location": { "type": "string", "defaultValue": "[resourceGroup().location]" }
+    "location": { "type": "string", "defaultValue": "[resourceGroup().location]" },
+    "scriptVersion": { "type": "string", "defaultValue": "20260609-1" }
   },
   "variables": {
     "suffix": "[uniqueString(resourceGroup().id)]",
@@ -120,7 +121,7 @@
       "dependsOn": [ "[resourceId('Microsoft.Compute/virtualMachines', variables('vmName'))]" ],
       "properties": {
         "source": {
-          "scriptUri": "https://raw.githubusercontent.com/anmocanu/tonytest/refs/heads/main/Break-Gen2Boot-0xC0000001.ps1"
+          "scriptUri": "[concat('https://raw.githubusercontent.com/anmocanu/tonytest/refs/heads/main/Break-Gen2Boot-0xC0000001.ps1?v=', parameters('scriptVersion'))]"
         },
         "parameters": [
           {

