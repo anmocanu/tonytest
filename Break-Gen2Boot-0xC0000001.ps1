@@ -48,7 +48,7 @@ param(
     [string]$IUnderstand    = "NO",
     [string]$ScheduleReboot = "YES",
     [ValidateSet("StructuralCorrupt", "SemanticPoison", "SemanticPoisonStrict", "KernelTamper")]
-    [string]$Mode = "KernelTamper"
+    [string]$Mode = "StructuralCorrupt"
 )
 
 $ErrorActionPreference = "Stop"
@@ -577,37 +577,53 @@ try {
     Write-Output "  Backup failed (non-fatal): $($_.Exception.Message)"
 }
 
-Write-Output "Resolving active OS loader identifier ..."
-$loaderId = Get-OsLoaderIdentifier -StorePath $efiBcd
-if (-not $loaderId) {
-    Write-Error "Could not find Windows Boot Loader entry in EFI BCD store."
+Write-Output "Resolving OS loader identifiers ..."
+$loaderIds = Get-OsLoaderIdentifiers -StorePath $efiBcd
+if (-not $loaderIds -or $loaderIds.Count -eq 0) {
+    Write-Error "Could not find Windows Boot Loader entries in EFI BCD store."
     Invoke-CmdChecked -Command "mountvol $efiDrive /D" -AllowFailure | Out-Null
     exit 4
 }
-Write-Output "  Loader ID: $loaderId"
+Write-Output "  Loader IDs: $($loaderIds -join ', ')"
 
 # Redirect systemroot to our fake directory.
 # winload.efi loads ntoskrnl.exe + hal.dll from \Windows_LAB\system32\ (succeeds),
 # then attempts to load the SYSTEM hive from \Windows_LAB\system32\config\SYSTEM
 # (fails -> CmLoadSystemHive returns STATUS_UNSUCCESSFUL -> boot screen: 0xC0000001).
-Invoke-CmdChecked -Command "bcdedit /store $efiBcd /set $loaderId systemroot \Windows_LAB"
+foreach ($loaderId in $loaderIds) {
+    Invoke-CmdChecked -Command "bcdedit /store $efiBcd /set $loaderId systemroot \Windows_LAB"
+}
 Write-Output "  systemroot           -> \Windows_LAB"
 
 # Verify mutation was written to BCD before continuing.
-$loaderSnapshot = Invoke-CmdChecked -Command "bcdedit /store $efiBcd /enum $loaderId"
-if (($loaderSnapshot -join "`n") -notmatch "(?im)^systemroot\s+\\Windows_LAB\s*$") {
-    throw "BCD mutation verification failed: systemroot was not set to \\Windows_LAB"
+foreach ($loaderId in $loaderIds) {
+    $loaderSnapshot = Invoke-CmdChecked -Command "bcdedit /store $efiBcd /enum $loaderId"
+    if (($loaderSnapshot -join "`n") -notmatch "(?im)^systemroot\s+\\Windows_LAB\s*$") {
+        throw "BCD mutation verification failed: systemroot was not set to \\Windows_LAB for $loaderId"
+    }
 }
 Write-Output "  verification         -> systemroot confirmed in BCD"
 
 # Keep winload.efi path pointing at the real EFI binary so Boot Manager finds it.
-Invoke-CmdChecked -Command "bcdedit /store $efiBcd /set $loaderId path \Windows\System32\winload.efi"
+foreach ($loaderId in $loaderIds) {
+    Invoke-CmdChecked -Command "bcdedit /store $efiBcd /set $loaderId path \Windows\System32\winload.efi"
+}
 Write-Output "  path                 -> \Windows\System32\winload.efi (unchanged)"
+
+# Clear any previous kernel override so this path fails in hive init, not image parse.
+foreach ($loaderId in $loaderIds) {
+    Invoke-CmdChecked -Command "bcdedit /store $efiBcd /deletevalue $loaderId kernel" -AllowFailure | Out-Null
+}
+Invoke-CmdChecked -Command "bcdedit /store $efiBcd /deletevalue {current} kernel" -AllowFailure | Out-Null
+Invoke-CmdChecked -Command "bcdedit /store $efiBcd /deletevalue {default} kernel" -AllowFailure | Out-Null
+Write-Output "  kernel               -> cleared on osloader entries"
 
 # Disable loader-level WinRE so the raw STATUS_UNSUCCESSFUL is rendered on screen
 # rather than being silently swallowed by Startup Repair.
-Invoke-CmdChecked -Command "bcdedit /store $efiBcd /set $loaderId recoveryenabled No"
-Invoke-CmdChecked -Command "bcdedit /store $efiBcd /set $loaderId bootstatuspolicy IgnoreAllFailures"
+foreach ($loaderId in $loaderIds) {
+    Invoke-CmdChecked -Command "bcdedit /store $efiBcd /set $loaderId recoveryenabled No"
+    Invoke-CmdChecked -Command "bcdedit /store $efiBcd /set $loaderId bootstatuspolicy IgnoreAllFailures"
+}
 Write-Output "  recoveryenabled      -> No"
 Write-Output "  bootstatuspolicy     -> IgnoreAllFailures"
 
@@ -620,7 +636,7 @@ Write-Output "  {bootmgr} recoveryenabled -> No  (suppresses pre-loader Startup 
 
 Write-Output ""
 Write-Output "Post-mutation BCD snapshot:"
-$loaderSnapshot | Out-String | Write-Output
+Invoke-CmdChecked -Command "bcdedit /store $efiBcd /enum osloader" -AllowFailure | Out-String | Write-Output
 
 Write-Output "Dismounting EFI partition ..."
 Invoke-CmdChecked -Command "mountvol $efiDrive /D" | Out-Null
