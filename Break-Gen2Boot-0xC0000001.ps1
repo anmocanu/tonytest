@@ -439,15 +439,32 @@ try {
     Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null
     Start-ScheduledTask -TaskName $taskName
 
-    Start-Sleep -Seconds 3
+    # Wait for completion so RunCommand output includes definitive status.
+    $maxWaitSec = 120
+    $elapsed = 0
     $taskInfo = Get-ScheduledTaskInfo -TaskName $taskName
+    while ($elapsed -lt $maxWaitSec -and $taskInfo.LastTaskResult -eq 267009) {
+        Start-Sleep -Seconds 5
+        $elapsed += 5
+        $taskInfo = Get-ScheduledTaskInfo -TaskName $taskName
+    }
 
     Write-Output "  Scheduled task created: $taskName"
     Write-Output "  Payload path           : $payloadPath"
     Write-Output "  Payload log path       : $payloadLogPath"
     Write-Output "  Trigger time           : $($trigger.StartBoundary)"
+    Write-Output "  Waited for task (sec)  : $elapsed"
     Write-Output "  Task last run time     : $($taskInfo.LastRunTime)"
     Write-Output "  Task last result       : $($taskInfo.LastTaskResult)"
+
+    if (Test-Path $payloadLogPath) {
+        Write-Output ""
+        Write-Output "  Payload log tail:"
+        Get-Content -Path $payloadLogPath -Tail 30 | ForEach-Object { Write-Output "    $_" }
+    } else {
+        Write-Output "  Payload log tail       : log file not found yet"
+    }
+
     Write-Output "  Expected outcome       : boot failure targeting 0xC0000001 (build-dependent)"
 }
 
