@@ -60,23 +60,29 @@ function Invoke-CmdChecked {
         [Parameter(Mandatory)][string]$Command,
         [switch]$AllowFailure
     )
-    # PowerShell 7 can promote native stderr to terminating errors when
-    # ErrorActionPreference=Stop. Temporarily disable that behavior so we can
-    # make decisions strictly by native process exit code.
-    $hasNativeErrPref = $null -ne (Get-Variable -Name PSNativeCommandUseErrorActionPreference -ErrorAction SilentlyContinue)
-    if ($hasNativeErrPref) {
-        $oldNativeErrPref = $PSNativeCommandUseErrorActionPreference
-        $PSNativeCommandUseErrorActionPreference = $false
-    }
+    Write-Output "  [cmd] $Command"
 
-    try {
-        $out  = & cmd.exe /d /s /c "$Command" 2>&1
-        $code = $LASTEXITCODE
-    } finally {
-        if ($hasNativeErrPref) {
-            $PSNativeCommandUseErrorActionPreference = $oldNativeErrPref
-        }
-    }
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = "cmd.exe"
+    $psi.Arguments = "/d /c $Command"
+    $psi.UseShellExecute = $false
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.CreateNoWindow = $true
+
+    $proc = New-Object System.Diagnostics.Process
+    $proc.StartInfo = $psi
+
+    [void]$proc.Start()
+    $stdout = $proc.StandardOutput.ReadToEnd()
+    $stderr = $proc.StandardError.ReadToEnd()
+    $proc.WaitForExit()
+
+    $code = $proc.ExitCode
+    $out = @()
+    if ($stdout) { $out += ($stdout -split "`r?`n") }
+    if ($stderr) { $out += ($stderr -split "`r?`n") }
+    $out = $out | Where-Object { $_ -ne "" }
 
     if (-not $AllowFailure -and $code -ne 0) {
         throw "Command failed (exit $code): $Command`n$out"
