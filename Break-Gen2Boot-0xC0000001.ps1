@@ -309,6 +309,30 @@ function Invoke-KernelTamperBreak {
         exit 5
     }
 
+    # If prior runs redirected systemroot to \Windows_LAB, restore normal loader
+    # settings first so the boot path reaches kernel loading.
+    $efiDrive = "S:"
+    $efiBcd   = "$efiDrive\EFI\Microsoft\Boot\BCD"
+    Write-Output "  Restoring active loader to normal systemroot (\\Windows) ..."
+    Invoke-CmdChecked -Command "mountvol $efiDrive /S" | Out-Null
+    try {
+        if (Test-Path $efiBcd) {
+            $loaderId = Get-OsLoaderIdentifier -StorePath $efiBcd
+            if ($loaderId) {
+                Write-Output "  Loader ID for restore   : $loaderId"
+                Invoke-CmdChecked -Command "bcdedit /store $efiBcd /set $loaderId systemroot \Windows" | Out-Null
+                Invoke-CmdChecked -Command "bcdedit /store $efiBcd /set $loaderId path \Windows\System32\winload.efi" | Out-Null
+                Write-Output "  Restore verification    : systemroot set to \\Windows"
+            } else {
+                Write-Warning "Could not resolve OS loader during restore step; continuing with KernelTamper task."
+            }
+        } else {
+            Write-Warning "EFI BCD store not found during restore step; continuing with KernelTamper task."
+        }
+    } finally {
+        Invoke-CmdChecked -Command "mountvol $efiDrive /D" -AllowFailure | Out-Null
+    }
+
     $taskName = "Lab-0xC0000001-KernelTamper"
     $payloadPath = "C:\Windows\Temp\KernelTamperBreak.ps1"
 
