@@ -9,7 +9,7 @@
     "securityType": {
       "type": "string",
       "defaultValue": "TrustedLaunch",
-      "allowedValues": [ "TrustedLaunch", "Standard" ]
+      "allowedValues": [ "TrustedLaunch" ]
     }
   },
   "variables": {
