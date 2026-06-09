@@ -82,7 +82,7 @@ function Invoke-CmdChecked {
         throw "Command failed (exit $code): $Command`n$out"
     }
     if ($AllowFailure -and $code -ne 0) {
-        Write-Warning "AllowFailure command returned exit $code: $Command"
+        Write-Warning "AllowFailure command returned exit ${code}: $Command"
     }
     return $out
 }
