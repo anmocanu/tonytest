@@ -48,7 +48,7 @@ param(
     [string]$IUnderstand    = "NO",
     [string]$ScheduleReboot = "YES",
     [ValidateSet("StructuralCorrupt", "SemanticPoison")]
-    [string]$Mode = "SemanticPoison"
+    [string]$Mode = "StructuralCorrupt"
 )
 
 $ErrorActionPreference = "Stop"
@@ -60,10 +60,29 @@ function Invoke-CmdChecked {
         [Parameter(Mandatory)][string]$Command,
         [switch]$AllowFailure
     )
-    $out  = cmd /c $Command 2>&1
-    $code = $LASTEXITCODE
+    # PowerShell 7 can promote native stderr to terminating errors when
+    # ErrorActionPreference=Stop. Temporarily disable that behavior so we can
+    # make decisions strictly by native process exit code.
+    $hasNativeErrPref = $null -ne (Get-Variable -Name PSNativeCommandUseErrorActionPreference -ErrorAction SilentlyContinue)
+    if ($hasNativeErrPref) {
+        $oldNativeErrPref = $PSNativeCommandUseErrorActionPreference
+        $PSNativeCommandUseErrorActionPreference = $false
+    }
+
+    try {
+        $out  = & cmd.exe /d /s /c "$Command" 2>&1
+        $code = $LASTEXITCODE
+    } finally {
+        if ($hasNativeErrPref) {
+            $PSNativeCommandUseErrorActionPreference = $oldNativeErrPref
+        }
+    }
+
     if (-not $AllowFailure -and $code -ne 0) {
         throw "Command failed (exit $code): $Command`n$out"
+    }
+    if ($AllowFailure -and $code -ne 0) {
+        Write-Warning "AllowFailure command returned exit $code: $Command"
     }
     return $out
 }
@@ -206,7 +225,9 @@ if ($IUnderstand -ne "YES") {
 
 # Phase 1: build the fake systemroot BEFORE touching the BCD store so that if the
 # directory step fails we have not yet dirtied the bootloader configuration.
+Write-Output "Checkpoint: entering Phase 1 (fake system root build)."
 Build-FakeSystemRoot -Mode $Mode
+Write-Output "Checkpoint: Phase 1 complete. Proceeding to EFI BCD mutation phase."
 
 # Phase 2: modify the EFI BCD store.
 $efiDrive = "S:"
@@ -248,6 +269,13 @@ Write-Output "  Loader ID: $loaderId"
 Invoke-CmdChecked -Command "bcdedit /store $efiBcd /set $loaderId systemroot \Windows_LAB"
 Write-Output "  systemroot           -> \Windows_LAB"
 
+# Verify mutation was written to BCD before continuing.
+$loaderSnapshot = Invoke-CmdChecked -Command "bcdedit /store $efiBcd /enum $loaderId"
+if (($loaderSnapshot -join "`n") -notmatch "(?im)^systemroot\s+\\Windows_LAB\s*$") {
+    throw "BCD mutation verification failed: systemroot was not set to \\Windows_LAB"
+}
+Write-Output "  verification         -> systemroot confirmed in BCD"
+
 # Keep winload.efi path pointing at the real EFI binary so Boot Manager finds it.
 Invoke-CmdChecked -Command "bcdedit /store $efiBcd /set $loaderId path \Windows\System32\winload.efi"
 Write-Output "  path                 -> \Windows\System32\winload.efi (unchanged)"
@@ -268,7 +296,7 @@ Write-Output "  {bootmgr} recoveryenabled -> No  (suppresses pre-loader Startup 
 
 Write-Output ""
 Write-Output "Post-mutation BCD snapshot:"
-Invoke-CmdChecked -Command "bcdedit /store $efiBcd /enum $loaderId" | Out-String | Write-Output
+$loaderSnapshot | Out-String | Write-Output
 
 Write-Output "Dismounting EFI partition ..."
 Invoke-CmdChecked -Command "mountvol $efiDrive /D" | Out-Null
