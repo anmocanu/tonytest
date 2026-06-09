@@ -13,12 +13,12 @@
     }
   },
   "variables": {
-    "suffix": "[uniqueString(resourceGroup().id)]",
+    "suffix": "[uniqueString(resourceGroup().id, parameters('scriptVersion'))]",
     "vmName": "[concat('win2025-gen2-', variables('suffix'))]",
-    "nicName": "nic-lab",
-    "vnetName": "vnet-lab",
-    "nsgName": "nsg-lab",
-    "pipName": "pip-lab"
+    "nicName": "[concat('nic-lab-', variables('suffix'))]",
+    "vnetName": "[concat('vnet-lab-', variables('suffix'))]",
+    "nsgName": "[concat('nsg-lab-', variables('suffix'))]",
+    "pipName": "[concat('pip-lab-', variables('suffix'))]"
   },
   "resources": [
     {
