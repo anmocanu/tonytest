@@ -95,19 +95,42 @@ function Invoke-CmdChecked {
 
 function Get-OsLoaderIdentifier {
     param([Parameter(Mandatory)][string]$StorePath)
-    $enum   = Invoke-CmdChecked -Command "bcdedit /store $StorePath /enum all"
-    $blocks = ($enum -join "`n") -split "`r?`n`r?`n"
+
+    # Prefer explicit OS loader entries to avoid selecting manager objects
+    # such as {fwbootmgr} or {bootmgr}.
+    $enumOsLoader = Invoke-CmdChecked -Command "bcdedit /store $StorePath /enum osloader"
+    $blocks = ($enumOsLoader -join "`n") -split "`r?`n`r?`n"
+    $candidates = @()
+
     foreach ($block in $blocks) {
-        if ($block -match "Windows Boot Loader" -and
-            $block -match "path\s+\\Windows\\system32\\winload\.efi") {
-            $idLine = ($block -split "`r?`n" |
-                       Where-Object { $_ -match "^identifier\s+" } |
-                       Select-Object -First 1)
-            if ($idLine -and $idLine -match "identifier\s+(\{[^\}]+\})") {
-                return $matches[1]
+        if ($block -match "(?im)^identifier\s+(\{[^\}]+\})" -and
+            $block -match "(?im)^path\s+\\Windows\\system32\\winload\.efi\s*$") {
+            $id = $matches[1]
+            if ($id -notin @("{fwbootmgr}", "{bootmgr}")) {
+                $candidates += $id
             }
         }
     }
+
+    if ($candidates.Count -gt 0) {
+        # Prefer concrete GUID-like entries over aliases such as {current}.
+        $guidCandidate = $candidates | Where-Object { $_ -match "^\{[0-9a-fA-F-]{36}\}$" } | Select-Object -First 1
+        if ($guidCandidate) { return $guidCandidate }
+        return ($candidates | Select-Object -First 1)
+    }
+
+    # Fallback for unusual stores: derive default from {bootmgr} and validate it.
+    $bootMgr = Invoke-CmdChecked -Command "bcdedit /store $StorePath /enum {bootmgr}" -AllowFailure
+    if ($bootMgr) {
+        $bootMgrText = ($bootMgr -join "`n")
+        if ($bootMgrText -match "(?im)^default\s+(\{[^\}]+\})") {
+            $defaultId = $matches[1]
+            if ($defaultId -notin @("{fwbootmgr}", "{bootmgr}")) {
+                return $defaultId
+            }
+        }
+    }
+
     return $null
 }
 
