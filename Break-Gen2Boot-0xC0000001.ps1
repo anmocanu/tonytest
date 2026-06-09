@@ -47,8 +47,8 @@ Designed for Azure RunCommand (non-interactive, SYSTEM context).
 param(
     [string]$IUnderstand    = "NO",
     [string]$ScheduleReboot = "YES",
-    [ValidateSet("StructuralCorrupt", "SemanticPoison")]
-    [string]$Mode = "StructuralCorrupt"
+    [ValidateSet("StructuralCorrupt", "SemanticPoison", "SemanticPoisonStrict")]
+    [string]$Mode = "SemanticPoisonStrict"
 )
 
 $ErrorActionPreference = "Stop"
@@ -110,7 +110,7 @@ function Get-OsLoaderIdentifier {
 function Build-FakeSystemRoot {
     param(
         [Parameter(Mandatory)]
-        [ValidateSet("StructuralCorrupt", "SemanticPoison")]
+        [ValidateSet("StructuralCorrupt", "SemanticPoison", "SemanticPoisonStrict")]
         [string]$Mode
     )
     <#
@@ -191,10 +191,10 @@ function Build-FakeSystemRoot {
         # surfacing generic STATUS_UNSUCCESSFUL (0xC0000001).
         $mountKey = "HKLM\LABSYS"
         Invoke-CmdChecked -Command "reg unload $mountKey" -AllowFailure | Out-Null
-        Write-Output "  Mode=SemanticPoison: loading exported hive to $mountKey ..."
+        Write-Output "  Mode=$Mode: loading exported hive to $mountKey ..."
         Invoke-CmdChecked -Command "reg load $mountKey `"$exportPath`""
         try {
-            Write-Output "  Removing Select key and poisoning control-set selectors ..."
+            Write-Output "  Rebuilding Select key with poisoned control-set selectors ..."
             Invoke-CmdChecked -Command "reg delete $mountKey\Select /f" -AllowFailure | Out-Null
             Invoke-CmdChecked -Command "reg add $mountKey\Select /f" | Out-Null
             Invoke-CmdChecked -Command "reg add $mountKey\Select /v Current /t REG_DWORD /d 4294967295 /f" | Out-Null
@@ -202,10 +202,18 @@ function Build-FakeSystemRoot {
             Invoke-CmdChecked -Command "reg add $mountKey\Select /v LastKnownGood /t REG_DWORD /d 4294967295 /f" | Out-Null
             Invoke-CmdChecked -Command "reg add $mountKey\Select /v Failed /t REG_DWORD /d 4294967295 /f" | Out-Null
 
-            # Ensure there is no matching control set for the poisoned selectors.
-            Invoke-CmdChecked -Command "reg delete $mountKey\ControlSet001 /f" -AllowFailure | Out-Null
-            Invoke-CmdChecked -Command "reg delete $mountKey\ControlSet002 /f" -AllowFailure | Out-Null
-            Invoke-CmdChecked -Command "reg delete $mountKey\CurrentControlSet /f" -AllowFailure | Out-Null
+            if ($Mode -eq "SemanticPoison") {
+                # Legacy semantic poison (more destructive): remove all candidate control sets.
+                Invoke-CmdChecked -Command "reg delete $mountKey\ControlSet001 /f" -AllowFailure | Out-Null
+                Invoke-CmdChecked -Command "reg delete $mountKey\ControlSet002 /f" -AllowFailure | Out-Null
+                Invoke-CmdChecked -Command "reg delete $mountKey\CurrentControlSet /f" -AllowFailure | Out-Null
+                Write-Output "  SemanticPoison: removed ControlSet001/002/CurrentControlSet."
+            } else {
+                # Strict semantic poison: keep hive structure and control sets present.
+                # This reduces the likelihood of a direct "registry file missing/corrupt"
+                # mapping and can surface a more generic loader failure code.
+                Write-Output "  SemanticPoisonStrict: control sets retained; selectors poisoned only."
+            }
         } finally {
             Invoke-CmdChecked -Command "reg unload $mountKey" -AllowFailure | Out-Null
         }
@@ -309,9 +317,13 @@ Write-Output "Corrupt file          : C:\Windows_LAB\system32\config\SYSTEM"
 if ($Mode -eq "StructuralCorrupt") {
     Write-Output "Corruption details    : Root-key NK cell (0x1020-0x109F) zeroed;"
     Write-Output "                        base-block checksum intact so file opens cleanly."
-} else {
+} elseif ($Mode -eq "SemanticPoison") {
     Write-Output "Corruption details    : Hive structure valid but Select/ControlSet"
     Write-Output "                        resolution intentionally poisoned."
+} else {
+    Write-Output "Corruption details    : Hive structure valid, control sets retained,"
+    Write-Output "                        Select values poisoned to invalid selectors."
+    Write-Output "                        Target code is 0xC0000001 (platform-dependent)."
 }
 
 if ($ScheduleReboot -eq "YES") {
