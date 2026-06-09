@@ -47,7 +47,7 @@ Designed for Azure RunCommand (non-interactive, SYSTEM context).
 param(
     [string]$IUnderstand    = "NO",
     [string]$ScheduleReboot = "YES",
-    [ValidateSet("StructuralCorrupt", "SemanticPoison", "SemanticPoisonStrict")]
+    [ValidateSet("StructuralCorrupt", "SemanticPoison", "SemanticPoisonStrict", "KernelTamper")]
     [string]$Mode = "SemanticPoisonStrict"
 )
 
@@ -296,11 +296,72 @@ function Build-FakeSystemRoot {
     Write-Output "  Fake system root ready: $fakeRoot"
 }
 
+function Invoke-KernelTamperBreak {
+    param(
+        [Parameter(Mandatory)][string]$ScheduleReboot
+    )
+
+    Write-Output ""
+    Write-Output "=== KernelTamper Mode (non-registry failure path) ==="
+
+    if ($ScheduleReboot -ne "YES") {
+        Write-Error "KernelTamper mode requires -ScheduleReboot YES."
+        exit 5
+    }
+
+    $taskName = "Lab-0xC0000001-KernelTamper"
+    $payloadPath = "C:\Windows\Temp\KernelTamperBreak.ps1"
+
+    $payload = @'
+Start-Sleep -Seconds 30
+
+$kernelPath = "C:\Windows\System32\ntoskrnl.exe"
+
+if (Test-Path $kernelPath) {
+    & cmd.exe /c "takeown /f $kernelPath /a" | Out-Null
+    & cmd.exe /c "icacls $kernelPath /grant administrators:F /c" | Out-Null
+    & cmd.exe /c "attrib -r -s -h $kernelPath" | Out-Null
+
+    [byte[]]$corruptBytes = 0x41, 0x42, 0x43, 0x44, 0x45, 0x46
+    $stream = [System.IO.File]::Open($kernelPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Write, [System.IO.FileShare]::Read)
+    try {
+        $stream.Seek(0, [System.IO.SeekOrigin]::Begin) | Out-Null
+        $stream.Write($corruptBytes, 0, $corruptBytes.Length)
+        $stream.Flush()
+    } finally {
+        $stream.Close()
+    }
+}
+
+& cmd.exe /c "shutdown /r /f /t 5 /c \"Lab: trigger 0xC0000001 via kernel tamper\""
+'@
+
+    Set-Content -Path $payloadPath -Value $payload -Encoding ASCII -Force
+
+    Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue | Out-Null
+    $action = New-ScheduledTaskAction -Execute "PowerShell.exe" -Argument "-NoProfile -ExecutionPolicy Bypass -File $payloadPath"
+    $trigger = New-ScheduledTaskTrigger -Once -At ((Get-Date).AddMinutes(1))
+    $principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -RunLevel Highest
+
+    Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Principal $principal -Force | Out-Null
+    Write-Output "  Scheduled task created: $taskName"
+    Write-Output "  Payload path           : $payloadPath"
+    Write-Output "  Trigger time           : $($trigger.StartBoundary)"
+    Write-Output "  Expected outcome       : boot failure targeting 0xC0000001 (build-dependent)"
+}
+
 # ── main ───────────────────────────────────────────────────────────────────────
 
 if ($IUnderstand -ne "YES") {
     Write-Error "Safety check failed. Set -IUnderstand YES to proceed."
     exit 2
+}
+
+if ($Mode -eq "KernelTamper") {
+    Write-Output "Checkpoint: entering KernelTamper mode."
+    Invoke-KernelTamperBreak -ScheduleReboot $ScheduleReboot
+    Write-Output "=== KernelTamper task armed ==="
+    exit 0
 }
 
 # Phase 1: build the fake systemroot BEFORE touching the BCD store so that if the
