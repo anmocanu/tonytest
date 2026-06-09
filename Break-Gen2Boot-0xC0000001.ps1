@@ -358,7 +358,15 @@ function Invoke-KernelTamperBreak {
 
                 Write-Output ""
                 Write-Output "  Post-restore osloader snapshot:"
-                Invoke-CmdChecked -Command "bcdedit /store $efiBcd /enum osloader" -AllowFailure | Out-String | Write-Output
+                $postRestoreSnapshot = Invoke-CmdChecked -Command "bcdedit /store $efiBcd /enum osloader" -AllowFailure
+                $postRestoreSnapshot | Out-String | Write-Output
+
+                # Trusted Launch / isolated context can ignore alternate kernel
+                # directives, causing KernelTamper mode to report success but boot
+                # normally. Fail fast with explicit guidance instead of false positives.
+                if (($postRestoreSnapshot -join "`n") -match "(?im)^isolatedcontext\s+Yes\s*$") {
+                    throw "KernelTamper mode is blocked by Trusted Launch (isolatedcontext=Yes). Deploy VM with securityType=Standard after registering Microsoft.Compute/UseStandardSecurityType, then retry."
+                }
             } else {
                 Write-Warning "Could not resolve OS loaders during restore step; continuing with KernelTamper task."
             }
@@ -450,8 +458,42 @@ try {
         throw "Verification failed: kernel bytes do not match expected corruption pattern."
     }
 
+    # Fallback hardening: if kernel override is ignored by platform security,
+    # also corrupt the primary kernel so boot cannot continue on the default path.
+    Write-Log "Applying fallback tamper to primary kernel."
+    & cmd.exe /c "takeown /f $kernelPath /a" | Out-Null
+    & cmd.exe /c "icacls $kernelPath /grant administrators:F /c" | Out-Null
+    & cmd.exe /c "attrib -r -s -h $kernelPath" | Out-Null
+
+    $stream2 = [System.IO.File]::Open($kernelPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::Read)
+    try {
+        $stream2.Seek(0, [System.IO.SeekOrigin]::Begin) | Out-Null
+        $stream2.Write($corruptBytes, 0, $corruptBytes.Length)
+        $stream2.Flush()
+    } finally {
+        $stream2.Close()
+    }
+
+    [byte[]]$verifyPrimary = [System.IO.File]::ReadAllBytes($kernelPath)[0..5]
+    $okPrimary = $true
+    for ($j = 0; $j -lt 6; $j++) {
+        if ($verifyPrimary[$j] -ne $corruptBytes[$j]) { $okPrimary = $false; break }
+    }
+
+    if (-not $okPrimary) {
+        throw "Verification failed: primary kernel bytes do not match expected corruption pattern."
+    }
+    Write-Log "Primary kernel tamper verified."
+
     Write-Log "Kernel tamper verified. Triggering forced reboot."
-    & cmd.exe /c "shutdown /r /f /t 5 /c \"Lab: trigger 0xC0000001 via kernel tamper\""
+    & cmd.exe /c "shutdown /r /f /t 0 /c \"Lab: trigger 0xC0000001 via kernel tamper\"" | Out-Null
+    $shutdownCode = $LASTEXITCODE
+    Write-Log ("shutdown.exe exit code: " + $shutdownCode)
+
+    if ($shutdownCode -ne 0) {
+        Write-Log "shutdown.exe reported non-zero. Falling back to Stop-Computer -Force."
+        Stop-Computer -Force
+    }
 } catch {
     Write-Log ("Payload failure: " + $_.Exception.Message)
     throw
