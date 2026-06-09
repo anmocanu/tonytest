@@ -165,6 +165,32 @@ function Get-OsLoaderIdentifier {
     return $null
 }
 
+function Get-OsLoaderIdentifiers {
+    param([Parameter(Mandatory)][string]$StorePath)
+
+    $ids = @()
+    $enumOsLoader = Invoke-CmdChecked -Command "bcdedit /store $StorePath /enum osloader" -AllowFailure
+    if ($enumOsLoader) {
+        $blocks = ($enumOsLoader -join "`n") -split "`r?`n`r?`n"
+        foreach ($block in $blocks) {
+            $idMatch = [regex]::Match($block, "(?im)^identifier\s+(\{[^\}]+\})")
+            if ($idMatch.Success) {
+                $id = $idMatch.Groups[1].Value
+                if ($id -notin @("{fwbootmgr}", "{bootmgr}")) {
+                    $ids += $id
+                }
+            }
+        }
+    }
+
+    if ($ids.Count -eq 0) {
+        $single = Get-OsLoaderIdentifier -StorePath $StorePath
+        if ($single) { $ids += $single }
+    }
+
+    return ($ids | Select-Object -Unique)
+}
+
 # ── Strategy 6: build fake systemroot with a corrupt SYSTEM hive ──────────────
 
 function Build-FakeSystemRoot {
@@ -317,14 +343,24 @@ function Invoke-KernelTamperBreak {
     Invoke-CmdChecked -Command "mountvol $efiDrive /S" | Out-Null
     try {
         if (Test-Path $efiBcd) {
-            $loaderId = Get-OsLoaderIdentifier -StorePath $efiBcd
-            if ($loaderId) {
-                Write-Output "  Loader ID for restore   : $loaderId"
-                Invoke-CmdChecked -Command "bcdedit /store $efiBcd /set $loaderId systemroot \Windows" | Out-Null
-                Invoke-CmdChecked -Command "bcdedit /store $efiBcd /set $loaderId path \Windows\System32\winload.efi" | Out-Null
-                Write-Output "  Restore verification    : systemroot set to \\Windows"
+            $loaderIds = Get-OsLoaderIdentifiers -StorePath $efiBcd
+            if ($loaderIds -and $loaderIds.Count -gt 0) {
+                Write-Output "  Loader IDs for restore  : $($loaderIds -join ', ')"
+                foreach ($loaderId in $loaderIds) {
+                    Invoke-CmdChecked -Command "bcdedit /store $efiBcd /set $loaderId systemroot \Windows" -AllowFailure | Out-Null
+                    Invoke-CmdChecked -Command "bcdedit /store $efiBcd /set $loaderId path \Windows\System32\winload.efi" -AllowFailure | Out-Null
+                }
+
+                # Also enforce common aliases when available.
+                Invoke-CmdChecked -Command "bcdedit /store $efiBcd /set {current} systemroot \Windows" -AllowFailure | Out-Null
+                Invoke-CmdChecked -Command "bcdedit /store $efiBcd /set {default} systemroot \Windows" -AllowFailure | Out-Null
+                Write-Output "  Restore verification    : attempted systemroot=\\Windows on all osloader entries"
+
+                Write-Output ""
+                Write-Output "  Post-restore osloader snapshot:"
+                Invoke-CmdChecked -Command "bcdedit /store $efiBcd /enum osloader" -AllowFailure | Out-String | Write-Output
             } else {
-                Write-Warning "Could not resolve OS loader during restore step; continuing with KernelTamper task."
+                Write-Warning "Could not resolve OS loaders during restore step; continuing with KernelTamper task."
             }
         } else {
             Write-Warning "EFI BCD store not found during restore step; continuing with KernelTamper task."
