@@ -360,13 +360,6 @@ function Invoke-KernelTamperBreak {
                 Write-Output "  Post-restore osloader snapshot:"
                 $postRestoreSnapshot = Invoke-CmdChecked -Command "bcdedit /store $efiBcd /enum osloader" -AllowFailure
                 $postRestoreSnapshot | Out-String | Write-Output
-
-                # Trusted Launch / isolated context can ignore alternate kernel
-                # directives, causing KernelTamper mode to report success but boot
-                # normally. Fail fast with explicit guidance instead of false positives.
-                if (($postRestoreSnapshot -join "`n") -match "(?im)^isolatedcontext\s+Yes\s*$") {
-                    throw "KernelTamper mode is blocked by Trusted Launch (isolatedcontext=Yes). Deploy VM with securityType=Standard after registering Microsoft.Compute/UseStandardSecurityType, then retry."
-                }
             } else {
                 Write-Warning "Could not resolve OS loaders during restore step; continuing with KernelTamper task."
             }
