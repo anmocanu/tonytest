@@ -191,7 +191,7 @@ function Build-FakeSystemRoot {
         # surfacing generic STATUS_UNSUCCESSFUL (0xC0000001).
         $mountKey = "HKLM\LABSYS"
         Invoke-CmdChecked -Command "reg unload $mountKey" -AllowFailure | Out-Null
-        Write-Output "  Mode=$Mode: loading exported hive to $mountKey ..."
+        Write-Output "  Mode=${Mode}: loading exported hive to $mountKey ..."
         Invoke-CmdChecked -Command "reg load $mountKey `"$exportPath`""
         try {
             Write-Output "  Rebuilding Select key with poisoned control-set selectors ..."
