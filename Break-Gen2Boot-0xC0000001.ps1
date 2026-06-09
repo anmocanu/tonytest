@@ -47,8 +47,8 @@ Designed for Azure RunCommand (non-interactive, SYSTEM context).
 param(
     [string]$IUnderstand    = "NO",
     [string]$ScheduleReboot = "YES",
-    [ValidateSet("StructuralCorrupt", "SemanticPoison", "SemanticPoisonStrict", "KernelTamper")]
-    [string]$Mode = "StructuralCorrupt"
+    [ValidateSet("StructuralCorrupt", "SemanticPoison", "SemanticPoisonStrict", "SemanticTypePoison", "KernelTamper")]
+    [string]$Mode = "SemanticTypePoison"
 )
 
 $ErrorActionPreference = "Stop"
@@ -196,7 +196,7 @@ function Get-OsLoaderIdentifiers {
 function Build-FakeSystemRoot {
     param(
         [Parameter(Mandatory)]
-        [ValidateSet("StructuralCorrupt", "SemanticPoison", "SemanticPoisonStrict")]
+        [ValidateSet("StructuralCorrupt", "SemanticPoison", "SemanticPoisonStrict", "SemanticTypePoison")]
         [string]$Mode
     )
     <#
@@ -292,6 +292,14 @@ function Build-FakeSystemRoot {
                 Invoke-CmdChecked -Command "reg add $mountKey\Select /v Default /t REG_DWORD /d 3 /f" | Out-Null
                 Invoke-CmdChecked -Command "reg add $mountKey\Select /v LastKnownGood /t REG_DWORD /d 3 /f" | Out-Null
                 Invoke-CmdChecked -Command "reg add $mountKey\Select /v Failed /t REG_DWORD /d 3 /f" | Out-Null
+            } elseif ($Mode -eq "SemanticTypePoison") {
+                # Type poison path: keep hive bytes and control sets present, but
+                # make Select fields wrong value types to provoke loader logic
+                # failure without presenting as a structurally corrupt hive.
+                Invoke-CmdChecked -Command "reg add $mountKey\Select /v Current /t REG_SZ /d bad /f" | Out-Null
+                Invoke-CmdChecked -Command "reg add $mountKey\Select /v Default /t REG_SZ /d bad /f" | Out-Null
+                Invoke-CmdChecked -Command "reg add $mountKey\Select /v LastKnownGood /t REG_SZ /d bad /f" | Out-Null
+                Invoke-CmdChecked -Command "reg add $mountKey\Select /v Failed /t REG_SZ /d bad /f" | Out-Null
             } else {
                 Invoke-CmdChecked -Command "reg add $mountKey\Select /v Current /t REG_DWORD /d 4294967295 /f" | Out-Null
                 Invoke-CmdChecked -Command "reg add $mountKey\Select /v Default /t REG_DWORD /d 4294967295 /f" | Out-Null
@@ -305,12 +313,14 @@ function Build-FakeSystemRoot {
                 Invoke-CmdChecked -Command "reg delete $mountKey\ControlSet002 /f" -AllowFailure | Out-Null
                 Invoke-CmdChecked -Command "reg delete $mountKey\CurrentControlSet /f" -AllowFailure | Out-Null
                 Write-Output "  SemanticPoison: removed ControlSet001/002/CurrentControlSet."
-            } else {
+            } elseif ($Mode -eq "SemanticPoisonStrict") {
                 # Strict semantic poison: keep hive structure and control sets present.
                 # This reduces the likelihood of a direct "registry file missing/corrupt"
                 # mapping and can surface a more generic loader failure code.
                 Invoke-CmdChecked -Command "reg delete $mountKey\ControlSet003 /f" -AllowFailure | Out-Null
                 Write-Output "  SemanticPoisonStrict: control sets retained; selectors poisoned only."
+            } else {
+                Write-Output "  SemanticTypePoison: control sets retained; Select value types poisoned."
             }
         } finally {
             Invoke-CmdChecked -Command "reg unload $mountKey" -AllowFailure | Out-Null
@@ -652,6 +662,10 @@ if ($Mode -eq "StructuralCorrupt") {
 } elseif ($Mode -eq "SemanticPoison") {
     Write-Output "Corruption details    : Hive structure valid but Select/ControlSet"
     Write-Output "                        resolution intentionally poisoned."
+} elseif ($Mode -eq "SemanticTypePoison") {
+    Write-Output "Corruption details    : Hive structure and control sets retained;"
+    Write-Output "                        Select values use invalid data types."
+    Write-Output "                        Target code is 0xC0000001 (platform-dependent)."
 } else {
     Write-Output "Corruption details    : Hive structure valid, control sets retained,"
     Write-Output "                        Select values poisoned to invalid selectors."
