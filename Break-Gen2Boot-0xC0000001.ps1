@@ -257,10 +257,21 @@ function Build-FakeSystemRoot {
             Write-Output "  Rebuilding Select key with poisoned control-set selectors ..."
             Invoke-CmdChecked -Command "reg delete $mountKey\Select /f" -AllowFailure | Out-Null
             Invoke-CmdChecked -Command "reg add $mountKey\Select /f" | Out-Null
-            Invoke-CmdChecked -Command "reg add $mountKey\Select /v Current /t REG_DWORD /d 4294967295 /f" | Out-Null
-            Invoke-CmdChecked -Command "reg add $mountKey\Select /v Default /t REG_DWORD /d 4294967295 /f" | Out-Null
-            Invoke-CmdChecked -Command "reg add $mountKey\Select /v LastKnownGood /t REG_DWORD /d 4294967295 /f" | Out-Null
-            Invoke-CmdChecked -Command "reg add $mountKey\Select /v Failed /t REG_DWORD /d 4294967295 /f" | Out-Null
+            if ($Mode -eq "SemanticPoisonStrict") {
+                # Strict path: keep hive structurally valid but reference a cleanly
+                # non-existent control set index. In practice this often avoids a
+                # hard "registry file corrupt/missing" mapping and can surface a
+                # more generic loader failure code.
+                Invoke-CmdChecked -Command "reg add $mountKey\Select /v Current /t REG_DWORD /d 3 /f" | Out-Null
+                Invoke-CmdChecked -Command "reg add $mountKey\Select /v Default /t REG_DWORD /d 3 /f" | Out-Null
+                Invoke-CmdChecked -Command "reg add $mountKey\Select /v LastKnownGood /t REG_DWORD /d 3 /f" | Out-Null
+                Invoke-CmdChecked -Command "reg add $mountKey\Select /v Failed /t REG_DWORD /d 3 /f" | Out-Null
+            } else {
+                Invoke-CmdChecked -Command "reg add $mountKey\Select /v Current /t REG_DWORD /d 4294967295 /f" | Out-Null
+                Invoke-CmdChecked -Command "reg add $mountKey\Select /v Default /t REG_DWORD /d 4294967295 /f" | Out-Null
+                Invoke-CmdChecked -Command "reg add $mountKey\Select /v LastKnownGood /t REG_DWORD /d 4294967295 /f" | Out-Null
+                Invoke-CmdChecked -Command "reg add $mountKey\Select /v Failed /t REG_DWORD /d 4294967295 /f" | Out-Null
+            }
 
             if ($Mode -eq "SemanticPoison") {
                 # Legacy semantic poison (more destructive): remove all candidate control sets.
@@ -272,6 +283,7 @@ function Build-FakeSystemRoot {
                 # Strict semantic poison: keep hive structure and control sets present.
                 # This reduces the likelihood of a direct "registry file missing/corrupt"
                 # mapping and can surface a more generic loader failure code.
+                Invoke-CmdChecked -Command "reg delete $mountKey\ControlSet003 /f" -AllowFailure | Out-Null
                 Write-Output "  SemanticPoisonStrict: control sets retained; selectors poisoned only."
             }
         } finally {
