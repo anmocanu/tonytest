@@ -96,6 +96,15 @@ function Invoke-CmdChecked {
 function Get-OsLoaderIdentifier {
     param([Parameter(Mandatory)][string]$StorePath)
 
+    $bootMgrDefault = $null
+    $bootMgr = Invoke-CmdChecked -Command "bcdedit /store $StorePath /enum {bootmgr}" -AllowFailure
+    if ($bootMgr) {
+        $bootMgrText = ($bootMgr -join "`n")
+        if ($bootMgrText -match "(?im)^default\s+(\{[^\}]+\})") {
+            $bootMgrDefault = $matches[1]
+        }
+    }
+
     # Prefer explicit OS loader entries to avoid selecting manager objects
     # such as {fwbootmgr} or {bootmgr}.
     $enumOsLoader = Invoke-CmdChecked -Command "bcdedit /store $StorePath /enum osloader"
@@ -103,9 +112,11 @@ function Get-OsLoaderIdentifier {
     $candidates = @()
 
     foreach ($block in $blocks) {
-        if ($block -match "(?im)^identifier\s+(\{[^\}]+\})" -and
-            $block -match "(?im)^path\s+\\Windows\\system32\\winload\.efi\s*$") {
-            $id = $matches[1]
+        $idMatch = [regex]::Match($block, "(?im)^identifier\s+(\{[^\}]+\})")
+        $isWinloadEntry = [regex]::IsMatch($block, "(?im)^path\s+\\Windows\\system32\\winload\.efi\s*$")
+
+        if ($idMatch.Success -and $isWinloadEntry) {
+            $id = $idMatch.Groups[1].Value
             if ($id -notin @("{fwbootmgr}", "{bootmgr}")) {
                 $candidates += $id
             }
@@ -113,22 +124,42 @@ function Get-OsLoaderIdentifier {
     }
 
     if ($candidates.Count -gt 0) {
+        if ($bootMgrDefault -and ($candidates -contains $bootMgrDefault)) {
+            return $bootMgrDefault
+        }
+
+        # If present, prefer the currently running loader alias.
+        if ($candidates -contains "{current}") {
+            return "{current}"
+        }
+
         # Prefer concrete GUID-like entries over aliases such as {current}.
         $guidCandidate = $candidates | Where-Object { $_ -match "^\{[0-9a-fA-F-]{36}\}$" } | Select-Object -First 1
         if ($guidCandidate) { return $guidCandidate }
         return ($candidates | Select-Object -First 1)
     }
 
-    # Fallback for unusual stores: derive default from {bootmgr} and validate it.
-    $bootMgr = Invoke-CmdChecked -Command "bcdedit /store $StorePath /enum {bootmgr}" -AllowFailure
-    if ($bootMgr) {
-        $bootMgrText = ($bootMgr -join "`n")
-        if ($bootMgrText -match "(?im)^default\s+(\{[^\}]+\})") {
-            $defaultId = $matches[1]
-            if ($defaultId -notin @("{fwbootmgr}", "{bootmgr}")) {
-                return $defaultId
+    # Secondary fallback: some environments expose entries under /enum all only.
+    $enumAll = Invoke-CmdChecked -Command "bcdedit /store $StorePath /enum all"
+    $allBlocks = ($enumAll -join "`n") -split "`r?`n`r?`n"
+    foreach ($block in $allBlocks) {
+        $isLoader = [regex]::IsMatch($block, "(?im)^application\s+osloader\s*$") -or
+                    [regex]::IsMatch($block, "(?im)^Windows Boot Loader\s*$")
+        if (-not $isLoader) { continue }
+
+        $idMatch = [regex]::Match($block, "(?im)^identifier\s+(\{[^\}]+\})")
+        $isWinloadEntry = [regex]::IsMatch($block, "(?im)^path\s+\\Windows\\system32\\winload\.efi\s*$")
+        if ($idMatch.Success -and $isWinloadEntry) {
+            $id = $idMatch.Groups[1].Value
+            if ($id -notin @("{fwbootmgr}", "{bootmgr}")) {
+                return $id
             }
         }
+    }
+
+    # Fallback for unusual stores: return {bootmgr} default if it is not a manager object.
+    if ($bootMgrDefault -and $bootMgrDefault -notin @("{fwbootmgr}", "{bootmgr}")) {
+        return $bootMgrDefault
     }
 
     return $null
