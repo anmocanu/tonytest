@@ -2,14 +2,35 @@
   "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
   "contentVersion": "1.0.0.0",
   "parameters": {
-    "adminUsername": { "type": "string" },
-    "adminPassword": { "type": "secureString", "minLength": 12 },
-    "location": { "type": "string", "defaultValue": "[resourceGroup().location]" },
-    "scriptVersion": { "type": "string", "defaultValue": "20260609-1" },
+    "adminUsername": {
+      "type": "string"
+    },
+    "adminPassword": {
+      "type": "secureString",
+      "minLength": 12
+    },
+    "location": {
+      "type": "string",
+      "defaultValue": "[resourceGroup().location]"
+    },
+    "scriptVersion": {
+      "type": "string",
+      "defaultValue": "20260610-bcdmissingdevice-1"
+    },
     "securityType": {
       "type": "string",
       "defaultValue": "TrustedLaunch",
-      "allowedValues": [ "TrustedLaunch" ]
+      "allowedValues": [
+        "TrustedLaunch"
+      ]
+    },
+    "secureBootEnabled": {
+      "type": "bool",
+      "defaultValue": false
+    },
+    "vTpmEnabled": {
+      "type": "bool",
+      "defaultValue": true
     }
   },
   "variables": {
@@ -49,8 +70,12 @@
       "apiVersion": "2023-11-01",
       "name": "[variables('pipName')]",
       "location": "[parameters('location')]",
-      "sku": { "name": "Standard" },
-      "properties": { "publicIPAllocationMethod": "Static" }
+      "sku": {
+        "name": "Standard"
+      },
+      "properties": {
+        "publicIPAllocationMethod": "Static"
+      }
     },
     {
       "type": "Microsoft.Network/virtualNetworks",
@@ -58,8 +83,19 @@
       "name": "[variables('vnetName')]",
       "location": "[parameters('location')]",
       "properties": {
-        "addressSpace": { "addressPrefixes": [ "10.0.0.0/16" ] },
-        "subnets": [ { "name": "default", "properties": { "addressPrefix": "10.0.0.0/24" } } ]
+        "addressSpace": {
+          "addressPrefixes": [
+            "10.0.0.0/16"
+          ]
+        },
+        "subnets": [
+          {
+            "name": "default",
+            "properties": {
+              "addressPrefix": "10.0.0.0/24"
+            }
+          }
+        ]
       }
     },
     {
@@ -73,14 +109,22 @@
         "[resourceId('Microsoft.Network/networkSecurityGroups', variables('nsgName'))]"
       ],
       "properties": {
-        "networkSecurityGroup": { "id": "[resourceId('Microsoft.Network/networkSecurityGroups', variables('nsgName'))]" },
-        "ipConfigurations": [ {
-          "name": "ipconfig1",
-          "properties": {
-            "publicIPAddress": { "id": "[resourceId('Microsoft.Network/publicIPAddresses', variables('pipName'))]" },
-            "subnet": { "id": "[resourceId('Microsoft.Network/virtualNetworks/subnets', variables('vnetName'), 'default')]" }
+        "networkSecurityGroup": {
+          "id": "[resourceId('Microsoft.Network/networkSecurityGroups', variables('nsgName'))]"
+        },
+        "ipConfigurations": [
+          {
+            "name": "ipconfig1",
+            "properties": {
+              "publicIPAddress": {
+                "id": "[resourceId('Microsoft.Network/publicIPAddresses', variables('pipName'))]"
+              },
+              "subnet": {
+                "id": "[resourceId('Microsoft.Network/virtualNetworks/subnets', variables('vnetName'), 'default')]"
+              }
+            }
           }
-        } ]
+        ]
       }
     },
     {
@@ -88,13 +132,17 @@
       "apiVersion": "2024-07-01",
       "name": "[variables('vmName')]",
       "location": "[parameters('location')]",
-      "dependsOn": [ "[resourceId('Microsoft.Network/networkInterfaces', variables('nicName'))]" ],
+      "dependsOn": [
+        "[resourceId('Microsoft.Network/networkInterfaces', variables('nicName'))]"
+      ],
       "properties": {
-        "hardwareProfile": { "vmSize": "Standard_B2ms" },
+        "hardwareProfile": {
+          "vmSize": "Standard_B2ms"
+        },
         "securityProfile": {
           "uefiSettings": {
-            "secureBootEnabled": "[if(equals(parameters('securityType'), 'TrustedLaunch'), true(), false())]",
-            "vTpmEnabled": "[if(equals(parameters('securityType'), 'TrustedLaunch'), true(), false())]"
+            "secureBootEnabled": "[parameters('secureBootEnabled')]",
+            "vTpmEnabled": "[parameters('vTpmEnabled')]"
           },
           "securityType": "[parameters('securityType')]"
         },
@@ -116,9 +164,17 @@
           }
         },
         "networkProfile": {
-          "networkInterfaces": [ { "id": "[resourceId('Microsoft.Network/networkInterfaces', variables('nicName'))]" } ]
+          "networkInterfaces": [
+            {
+              "id": "[resourceId('Microsoft.Network/networkInterfaces', variables('nicName'))]"
+            }
+          ]
         },
-        "diagnosticsProfile": { "bootDiagnostics": { "enabled": true } }
+        "diagnosticsProfile": {
+          "bootDiagnostics": {
+            "enabled": true
+          }
+        }
       }
     },
     {
@@ -126,7 +182,9 @@
       "apiVersion": "2024-07-01",
       "name": "[concat(variables('vmName'), '/FinalBreakAttempt')]",
       "location": "[parameters('location')]",
-      "dependsOn": [ "[resourceId('Microsoft.Compute/virtualMachines', variables('vmName'))]" ],
+      "dependsOn": [
+        "[resourceId('Microsoft.Compute/virtualMachines', variables('vmName'))]"
+      ],
       "properties": {
         "source": {
           "scriptUri": "[concat('https://raw.githubusercontent.com/anmocanu/tonytest/refs/heads/main/Break-Gen2Boot-0xC0000001.ps1?v=', parameters('scriptVersion'))]"
@@ -142,7 +200,7 @@
           },
           {
             "name": "Mode",
-            "value": "SemanticTypePoison"
+            "value": "BcdMissingDevice"
           }
         ]
       }
