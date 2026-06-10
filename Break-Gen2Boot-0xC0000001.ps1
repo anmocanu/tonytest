@@ -140,6 +140,41 @@ function Get-CurrentBcdText {
     return $combined
 }
 
+function Get-OsLoaderIdentifiers {
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = "bcdedit.exe"
+    $psi.UseShellExecute = $false
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.CreateNoWindow = $true
+    [void]$psi.ArgumentList.Add("/enum")
+    [void]$psi.ArgumentList.Add("osloader")
+    [void]$psi.ArgumentList.Add("/v")
+
+    $proc = New-Object System.Diagnostics.Process
+    $proc.StartInfo = $psi
+
+    [void]$proc.Start()
+    $stdout = $proc.StandardOutput.ReadToEnd()
+    $stderr = $proc.StandardError.ReadToEnd()
+    $proc.WaitForExit()
+
+    $combined = ""
+    if ($stdout) { $combined += $stdout }
+    if ($stderr) { $combined += "`r`n" + $stderr }
+
+    $ids = @()
+    $matches = [regex]::Matches($combined, "(?im)^identifier\s+(\{[^\}]+\})\s*$")
+    foreach ($m in $matches) {
+        $id = $m.Groups[1].Value
+        if ($id -notin @("{bootmgr}", "{fwbootmgr}")) {
+            $ids += $id
+        }
+    }
+
+    return ($ids | Select-Object -Unique)
+}
+
 function Test-BcdElementPresent {
     param(
         [Parameter(Mandatory = $true)]
@@ -160,12 +195,20 @@ if ($IUnderstand -ne "YES") {
 
 Write-Section "Gen2 BCD Current Loader Break"
 Write-Output "Target     : 0xC0000001 / STATUS_UNSUCCESSFUL"
-Write-Output "Method     : delete BCD device and osdevice from {current}"
-Write-Output "Scope      : currently booted Windows Boot Loader entry"
+Write-Output "Method     : delete BCD device and osdevice from all osloader entries"
+Write-Output "Scope      : all discovered boot loader identifiers (+ aliases)"
 Write-Output "Lab warning: this intentionally makes the VM non-bootable"
 
 Write-Section "Pre-mutation BCD state"
-Invoke-Native -FilePath "bcdedit.exe" -Arguments @("/enum", "{current}", "/v") | Out-Null
+Invoke-Native -FilePath "bcdedit.exe" -Arguments @("/enum", "osloader", "/v") | Out-Null
+
+$loaderIds = Get-OsLoaderIdentifiers
+if (-not $loaderIds -or $loaderIds.Count -eq 0) {
+    Write-Error "Could not resolve osloader identifiers from BCD store."
+    exit 11
+}
+
+Write-Output "Discovered osloader IDs: $($loaderIds -join ', ')"
 
 Write-Section "Backing up current BCD store"
 $backupPath = "C:\Windows\Temp\BCD-backup-before-0xC0000001-test.bak"
@@ -179,16 +222,26 @@ Invoke-Native -FilePath "bcdedit.exe" -Arguments @("/set", "{bootmgr}", "recover
 Invoke-Native -FilePath "bcdedit.exe" -Arguments @("/set", "{bootmgr}", "displaybootmenu", "No") -AllowFailure | Out-Null
 
 Write-Section "Normalizing loader so this is not a kernel/image/SYSTEM-hive test"
+foreach ($loaderId in $loaderIds) {
+    Invoke-Native -FilePath "bcdedit.exe" -Arguments @("/deletevalue", $loaderId, "kernel") -AllowFailure | Out-Null
+    Invoke-Native -FilePath "bcdedit.exe" -Arguments @("/set", $loaderId, "path", "\Windows\System32\winload.efi") -AllowFailure | Out-Null
+    Invoke-Native -FilePath "bcdedit.exe" -Arguments @("/set", $loaderId, "systemroot", "\Windows") -AllowFailure | Out-Null
+}
 Invoke-Native -FilePath "bcdedit.exe" -Arguments @("/deletevalue", "{current}", "kernel") -AllowFailure | Out-Null
-Invoke-Native -FilePath "bcdedit.exe" -Arguments @("/set", "{current}", "path", "\Windows\System32\winload.efi") -AllowFailure | Out-Null
-Invoke-Native -FilePath "bcdedit.exe" -Arguments @("/set", "{current}", "systemroot", "\Windows") -AllowFailure | Out-Null
+Invoke-Native -FilePath "bcdedit.exe" -Arguments @("/deletevalue", "{default}", "kernel") -AllowFailure | Out-Null
 
-Write-Section "Deleting BCD device and osdevice from {current}"
-Invoke-Native -FilePath "bcdedit.exe" -Arguments @("/deletevalue", "{current}", "device") | Out-Null
-Invoke-Native -FilePath "bcdedit.exe" -Arguments @("/deletevalue", "{current}", "osdevice") | Out-Null
+Write-Section "Deleting BCD device and osdevice from osloader entries"
+foreach ($loaderId in $loaderIds) {
+    Invoke-Native -FilePath "bcdedit.exe" -Arguments @("/deletevalue", $loaderId, "device") -AllowFailure | Out-Null
+    Invoke-Native -FilePath "bcdedit.exe" -Arguments @("/deletevalue", $loaderId, "osdevice") -AllowFailure | Out-Null
+}
+Invoke-Native -FilePath "bcdedit.exe" -Arguments @("/deletevalue", "{current}", "device") -AllowFailure | Out-Null
+Invoke-Native -FilePath "bcdedit.exe" -Arguments @("/deletevalue", "{current}", "osdevice") -AllowFailure | Out-Null
+Invoke-Native -FilePath "bcdedit.exe" -Arguments @("/deletevalue", "{default}", "device") -AllowFailure | Out-Null
+Invoke-Native -FilePath "bcdedit.exe" -Arguments @("/deletevalue", "{default}", "osdevice") -AllowFailure | Out-Null
 
 Write-Section "Post-mutation BCD state"
-Invoke-Native -FilePath "bcdedit.exe" -Arguments @("/enum", "{current}", "/v") | Out-Null
+Invoke-Native -FilePath "bcdedit.exe" -Arguments @("/enum", "osloader", "/v") | Out-Null
 
 Write-Section "Validation"
 $bcdText = Get-CurrentBcdText
@@ -199,8 +252,45 @@ $osdevicePresent = Test-BcdElementPresent -BcdText $bcdText -ElementName "osdevi
 Write-Output "device present after mutation   : $devicePresent"
 Write-Output "osdevice present after mutation : $osdevicePresent"
 
-if ($devicePresent -or $osdevicePresent) {
-    Write-Error "Validation failed. device/osdevice are still present in {current}. The boot-breaking mutation did not apply cleanly."
+$defaultTextPath = "C:\Windows\Temp\bcd-default-snapshot.txt"
+$defaultText = ""
+try {
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = "bcdedit.exe"
+    $psi.UseShellExecute = $false
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.CreateNoWindow = $true
+    [void]$psi.ArgumentList.Add("/enum")
+    [void]$psi.ArgumentList.Add("{default}")
+    [void]$psi.ArgumentList.Add("/v")
+
+    $proc = New-Object System.Diagnostics.Process
+    $proc.StartInfo = $psi
+    [void]$proc.Start()
+    $stdout = $proc.StandardOutput.ReadToEnd()
+    $stderr = $proc.StandardError.ReadToEnd()
+    $proc.WaitForExit()
+
+    if ($stdout) { $defaultText += $stdout }
+    if ($stderr) { $defaultText += "`r`n" + $stderr }
+    Set-Content -Path $defaultTextPath -Value $defaultText -Encoding ASCII -Force
+} catch {
+    Write-Warning "Failed to capture {default} snapshot for validation: $($_.Exception.Message)"
+}
+
+$defaultDevicePresent = $false
+$defaultOsdevicePresent = $false
+if ($defaultText) {
+    $defaultDevicePresent = Test-BcdElementPresent -BcdText $defaultText -ElementName "device"
+    $defaultOsdevicePresent = Test-BcdElementPresent -BcdText $defaultText -ElementName "osdevice"
+}
+
+Write-Output "{default} device present         : $defaultDevicePresent"
+Write-Output "{default} osdevice present       : $defaultOsdevicePresent"
+
+if ($devicePresent -or $osdevicePresent -or $defaultDevicePresent -or $defaultOsdevicePresent) {
+    Write-Error "Validation failed. device/osdevice are still present in active/default loader views. The boot-breaking mutation did not apply cleanly."
     exit 10
 }
 
