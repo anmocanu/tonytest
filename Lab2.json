@@ -177,7 +177,7 @@
       ],
       "properties": {
         "source": {
-          "scriptUri": "[concat('https://raw.githubusercontent.com/anmocanu/tonytest/refs/heads/main/Break-Gen2Boot-0xC0000001-BcdCurrent.ps1?v=', parameters('scriptVersion'))]"
+          "scriptUri": "[concat('https://raw.githubusercontent.com/anmocanu/tonytest/refs/heads/main/Break-Gen2Boot-0xC0000001.ps1?v=', parameters('scriptVersion'))]"
         },
         "parameters": [
           {
