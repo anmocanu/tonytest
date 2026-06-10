@@ -54,10 +54,7 @@ function Invoke-Native {
     $psi.RedirectStandardOutput = $true
     $psi.RedirectStandardError = $true
     $psi.CreateNoWindow = $true
-
-    foreach ($arg in $Arguments) {
-        [void]$psi.ArgumentList.Add($arg)
-    }
+    $psi.Arguments = $Arguments -join " "
 
     $proc = New-Object System.Diagnostics.Process
     $proc.StartInfo = $psi
@@ -119,9 +116,7 @@ function Get-CurrentBcdText {
     $psi.RedirectStandardOutput = $true
     $psi.RedirectStandardError = $true
     $psi.CreateNoWindow = $true
-    [void]$psi.ArgumentList.Add("/enum")
-    [void]$psi.ArgumentList.Add("{current}")
-    [void]$psi.ArgumentList.Add("/v")
+    $psi.Arguments = "/enum {current} /v"
 
     $proc = New-Object System.Diagnostics.Process
     $proc.StartInfo = $psi
@@ -147,9 +142,7 @@ function Get-OsLoaderIdentifiers {
     $psi.RedirectStandardOutput = $true
     $psi.RedirectStandardError = $true
     $psi.CreateNoWindow = $true
-    [void]$psi.ArgumentList.Add("/enum")
-    [void]$psi.ArgumentList.Add("osloader")
-    [void]$psi.ArgumentList.Add("/v")
+    $psi.Arguments = "/enum osloader /v"
 
     $proc = New-Object System.Diagnostics.Process
     $proc.StartInfo = $psi
@@ -261,17 +254,7 @@ try {
     $psi.RedirectStandardOutput = $true
     $psi.RedirectStandardError = $true
     $psi.CreateNoWindow = $true
-    [void]$psi.ArgumentList.Add("/enum")
-    [void]$psi.ArgumentList.Add("{default}")
-    [void]$psi.ArgumentList.Add("/v")
-
-    $proc = New-Object System.Diagnostics.Process
-    $proc.StartInfo = $psi
-    [void]$proc.Start()
-    $stdout = $proc.StandardOutput.ReadToEnd()
-    $stderr = $proc.StandardError.ReadToEnd()
-    $proc.WaitForExit()
-
+    $psi.Arguments = "/enum {default} /v"
     if ($stdout) { $defaultText += $stdout }
     if ($stderr) { $defaultText += "`r`n" + $stderr }
     Set-Content -Path $defaultTextPath -Value $defaultText -Encoding ASCII -Force
