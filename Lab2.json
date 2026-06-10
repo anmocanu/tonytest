@@ -15,31 +15,24 @@
     },
     "scriptVersion": {
       "type": "string",
-      "defaultValue": "20260610-bcdmissingdevice-1"
+      "defaultValue": "20260610-gen2-bcdcurrent-standard-1"
     },
-    "securityType": {
+    "imageSku": {
       "type": "string",
-      "defaultValue": "TrustedLaunch",
+      "defaultValue": "2022-datacenter-g2",
       "allowedValues": [
-        "TrustedLaunch"
+        "2022-datacenter-g2",
+        "2025-datacenter-g2"
       ]
-    },
-    "secureBootEnabled": {
-      "type": "bool",
-      "defaultValue": false
-    },
-    "vTpmEnabled": {
-      "type": "bool",
-      "defaultValue": true
     }
   },
   "variables": {
-    "suffix": "[uniqueString(resourceGroup().id, parameters('scriptVersion'))]",
-    "vmName": "[concat('win2025-gen2-', variables('suffix'))]",
-    "nicName": "[concat('nic-lab-', variables('suffix'))]",
-    "vnetName": "[concat('vnet-lab-', variables('suffix'))]",
-    "nsgName": "[concat('nsg-lab-', variables('suffix'))]",
-    "pipName": "[concat('pip-lab-', variables('suffix'))]"
+    "suffix": "[uniqueString(resourceGroup().id, parameters('scriptVersion'), parameters('imageSku'))]",
+    "vmName": "[concat('win-gen2-bcd-', variables('suffix'))]",
+    "nicName": "[concat('nic-gen2-bcd-', variables('suffix'))]",
+    "vnetName": "[concat('vnet-gen2-bcd-', variables('suffix'))]",
+    "nsgName": "[concat('nsg-gen2-bcd-', variables('suffix'))]",
+    "pipName": "[concat('pip-gen2-bcd-', variables('suffix'))]"
   },
   "resources": [
     {
@@ -140,22 +133,19 @@
           "vmSize": "Standard_B2ms"
         },
         "securityProfile": {
-          "uefiSettings": {
-            "secureBootEnabled": "[parameters('secureBootEnabled')]",
-            "vTpmEnabled": "[parameters('vTpmEnabled')]"
-          },
-          "securityType": "[parameters('securityType')]"
+          "securityType": "Standard",
+          "uefiSettings": "[null()]"
         },
         "storageProfile": {
           "imageReference": {
             "publisher": "MicrosoftWindowsServer",
             "offer": "WindowsServer",
-            "sku": "2025-datacenter-g2",
+            "sku": "[parameters('imageSku')]",
             "version": "latest"
           }
         },
         "osProfile": {
-          "computerName": "lab-gen2-break",
+          "computerName": "gen2-bcd-lab",
           "adminUsername": "[parameters('adminUsername')]",
           "adminPassword": "[parameters('adminPassword')]",
           "windowsConfiguration": {
@@ -187,7 +177,7 @@
       ],
       "properties": {
         "source": {
-          "scriptUri": "[concat('https://raw.githubusercontent.com/anmocanu/tonytest/refs/heads/main/Break-Gen2Boot-0xC0000001.ps1?v=', parameters('scriptVersion'))]"
+          "scriptUri": "[concat('https://raw.githubusercontent.com/anmocanu/tonytest/refs/heads/main/Break-Gen2Boot-0xC0000001-BcdCurrent.ps1?v=', parameters('scriptVersion'))]"
         },
         "parameters": [
           {
@@ -197,10 +187,6 @@
           {
             "name": "ScheduleReboot",
             "value": "YES"
-          },
-          {
-            "name": "Mode",
-            "value": "BcdMissingDevice"
           }
         ]
       }
