@@ -145,14 +145,13 @@ if ($AsyncDetonate -eq "YES") {
         exit 21
     }
 
-    $deferredLog  = "C:\Windows\Temp\Break-Gen2Boot-0xC000007B-deferred.log"
-    $escapedPath  = $selfPath.Replace("'", "''")
-    $command      = "Start-Sleep -Seconds $DelaySeconds; & '$escapedPath' -ScheduleReboot $ScheduleReboot -AsyncDetonate NO -DelaySeconds 0 *>> '$deferredLog'"
+    $deferredLog = "C:\Windows\Temp\Break-Gen2Boot-0xC000007B-deferred.log"
 
     try {
         Start-Process -FilePath "powershell.exe" -WindowStyle Hidden -ArgumentList @(
-            "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", $command
-        ) | Out-Null
+            "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $selfPath, 
+            "-ScheduleReboot", $ScheduleReboot, "-AsyncDetonate", "NO"
+        ) -RedirectStandardOutput $deferredLog -RedirectStandardError ($deferredLog + ".err") | Out-Null
     } catch {
         Write-Error "Failed to launch deferred worker process: $($_.Exception.Message)"
         exit 22
@@ -173,6 +172,13 @@ Write-Output "Target     : 0xC000007B / STATUS_INVALID_IMAGE_FORMAT"
 Write-Output "Method     : overwrite winload.efi with a zero-byte (invalid PE) file"
 Write-Output "Scope      : EFI System Partition + System32\Boot fallback"
 Write-Output "Lab warning: this intentionally makes the VM non-bootable"
+
+# If called with AsyncDetonate=NO, apply the delay that was set in deferred launcher
+if ($AsyncDetonate -eq "NO" -and $DelaySeconds -gt 0) {
+    Write-Section "Applying scheduled delay"
+    Write-Output "Sleeping for $DelaySeconds seconds before mutation..."
+    Start-Sleep -Seconds $DelaySeconds
+}
 
 Write-Section "Locating winload.efi"
 $targets = Find-WinloadEfi
@@ -236,10 +242,16 @@ Write-Output "Recovery          : Restore from backup at $backupDir"
 
 if ($ScheduleReboot -eq "YES") {
     Write-Section "Scheduling reboot"
-    $shutdownExitCode = Invoke-Native -FilePath "shutdown.exe" -Arguments @("/r", "/f", "/t", "10") -AllowFailure
-    if ($shutdownExitCode -ne 0) {
-        Write-Warning "shutdown.exe failed (ExitCode=$shutdownExitCode). Falling back to Restart-Computer."
-        try { Restart-Computer -Force } catch { Write-Warning "Restart-Computer also failed: $($_.Exception.Message)" }
+    try {
+        shutdown.exe /r /f /t 10
+        Write-Output "Reboot scheduled for 10 seconds."
+    } catch {
+        Write-Warning "shutdown.exe failed. Falling back to Restart-Computer."
+        try {
+            Restart-Computer -Force
+        } catch {
+            Write-Warning "Restart-Computer also failed: $($_.Exception.Message)"
+        }
     }
 } else {
     Write-Output ""
