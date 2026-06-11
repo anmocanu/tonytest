@@ -123,18 +123,6 @@
           "scriptUri": "https://raw.githubusercontent.com/anmocanu/tonytest/refs/heads/main/Break-Gen2Boot-0xC0000001.ps1"
         }
       }
-    },
-    {
-      "type": "Microsoft.Compute/virtualMachines/runCommands",
-      "apiVersion": "2024-07-01",
-      "name": "[concat(variables('vmName'), '/EnforceReboot')]",
-      "location": "[parameters('location')]",
-      "dependsOn": [ "[concat('Microsoft.Compute/virtualMachines/', variables('vmName'), '/runCommands/FinalBreakAttempt')]" ],
-      "properties": {
-        "source": {
-          "script": "Restart-Computer -Force"
-        }
-      }
     }
   ]
 }
