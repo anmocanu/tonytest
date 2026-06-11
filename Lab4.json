@@ -120,7 +120,7 @@
       "dependsOn": [ "[resourceId('Microsoft.Compute/virtualMachines', variables('vmName'))]" ],
       "properties": {
         "source": {
-          "scriptUri": "https://raw.githubusercontent.com/anmocanu/tonytest/refs/heads/main/Break-Gen2Boot-0xC000007B.ps1"
+          "scriptUri": "https://raw.githubusercontent.com/anmocanu/tonytest/refs/heads/main/Break-Gen2Boot-0xC0000007B.ps1"
         }
       }
     }
