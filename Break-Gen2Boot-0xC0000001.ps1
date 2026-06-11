@@ -29,7 +29,6 @@ Lab warning:
 #>
 
 param(
-    [string]$IUnderstand = "NO",
     [string]$ScheduleReboot = "YES"
 )
 
@@ -179,11 +178,6 @@ function Test-BcdElementPresent {
 
     $pattern = "(?im)^\s*$([regex]::Escape($ElementName))\s+"
     return [regex]::IsMatch($BcdText, $pattern)
-}
-
-if ($IUnderstand -ne "YES") {
-    Write-Error "Safety check failed. Set -IUnderstand YES to proceed. This script intentionally makes the VM non-bootable."
-    exit 2
 }
 
 Write-Section "Gen2 BCD Current Loader Break"
