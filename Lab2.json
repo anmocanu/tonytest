@@ -86,7 +86,7 @@
       "properties": {
         "hardwareProfile": { "vmSize": "Standard_B2ms" },
         "securityProfile": {
-          "uefiSettings": { "secureBootEnabled": false, "vTpmEnabled": false },
+          "uefiSettings": { "secureBootEnabled": true, "vTpmEnabled": true },
           "securityType": "TrustedLaunch"
         },
         "storageProfile": {
@@ -110,6 +110,18 @@
           "networkInterfaces": [ { "id": "[resourceId('Microsoft.Network/networkInterfaces', variables('nicName'))]" } ]
         },
         "diagnosticsProfile": { "bootDiagnostics": { "enabled": true } }
+      }
+    },
+    {
+      "type": "Microsoft.Compute/virtualMachines/runCommands",
+      "apiVersion": "2024-07-01",
+      "name": "[concat(variables('vmName'), '/FinalBreakAttempt')]",
+      "location": "[parameters('location')]",
+      "dependsOn": [ "[resourceId('Microsoft.Compute/virtualMachines', variables('vmName'))]" ],
+      "properties": {
+        "source": {
+          "scriptUri": "https://raw.githubusercontent.com/anmocanu/tonytest/refs/heads/main/Break-Gen2Boot-0xC0000001.ps1"
+        }
       }
     }
   ]
