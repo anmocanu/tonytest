@@ -29,7 +29,9 @@ Lab warning:
 #>
 
 param(
-    [string]$ScheduleReboot = "YES"
+    [string]$ScheduleReboot = "YES",
+    [string]$AsyncDetonate = "YES",
+    [int]$DelaySeconds = 90
 )
 
 $ErrorActionPreference = "Stop"
@@ -178,6 +180,44 @@ function Test-BcdElementPresent {
 
     $pattern = "(?im)^\s*$([regex]::Escape($ElementName))\s+"
     return [regex]::IsMatch($BcdText, $pattern)
+}
+
+if ($AsyncDetonate -eq "YES") {
+    Write-Section "Deferring disruptive operation"
+    Write-Output "Run mode         : deferred"
+    Write-Output "Delay (seconds)  : $DelaySeconds"
+    Write-Output "Schedule reboot  : $ScheduleReboot"
+
+    $selfPath = $PSCommandPath
+    if (-not $selfPath) {
+        $selfPath = $MyInvocation.MyCommand.Path
+    }
+
+    if (-not $selfPath -or -not (Test-Path $selfPath)) {
+        Write-Error "Could not resolve script path for deferred execution."
+        exit 21
+    }
+
+    $deferredLog = "C:\Windows\Temp\Break-Gen2Boot-deferred.log"
+    $escapedPath = $selfPath.Replace("'", "''")
+    $command = "Start-Sleep -Seconds $DelaySeconds; & '$escapedPath' -ScheduleReboot $ScheduleReboot -AsyncDetonate NO -DelaySeconds 0 *>> '$deferredLog'"
+
+    try {
+        Start-Process -FilePath "powershell.exe" -WindowStyle Hidden -ArgumentList @(
+            "-NoProfile",
+            "-ExecutionPolicy", "Bypass",
+            "-Command", $command
+        ) | Out-Null
+    }
+    catch {
+        Write-Error "Failed to launch deferred worker process: $($_.Exception.Message)"
+        exit 22
+    }
+
+    Write-Output "Deferred worker launched successfully."
+    Write-Output "Worker log path: $deferredLog"
+    Write-Output "Exiting now so RunCommand can complete before reboot/break."
+    exit 0
 }
 
 Write-Section "Gen2 BCD Current Loader Break"
