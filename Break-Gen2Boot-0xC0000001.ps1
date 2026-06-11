@@ -282,7 +282,7 @@ Write-Output "Important note    : If the VM still boots, the effective boot entr
 
 if ($ScheduleReboot -eq "YES") {
     Write-Section "Scheduling reboot"
-    Invoke-Native -FilePath "shutdown.exe" -Arguments @("/r", "/f", "/t", "60", "/c", "Lab: trigger 0xC0000001 via Gen2 BCD missing device osdevice") | Out-Null
+    Invoke-Native -FilePath "shutdown.exe" -Arguments @("/r", "/f", "/t", "60", "/c", "Lab: trigger 0xC0000001 via Gen2 BCD missing device osdevice") -AllowFailure | Out-Null
 }
 else {
     Write-Output ""
