@@ -249,8 +249,18 @@ try {
     $psi.RedirectStandardError = $true
     $psi.CreateNoWindow = $true
     $psi.Arguments = "/enum {default} /v"
+
+    $proc = New-Object System.Diagnostics.Process
+    $proc.StartInfo = $psi
+
+    [void]$proc.Start()
+    $stdout = $proc.StandardOutput.ReadToEnd()
+    $stderr = $proc.StandardError.ReadToEnd()
+    $proc.WaitForExit()
+
     if ($stdout) { $defaultText += $stdout }
     if ($stderr) { $defaultText += "`r`n" + $stderr }
+
     Set-Content -Path $defaultTextPath -Value $defaultText -Encoding ASCII -Force
 } catch {
     Write-Warning "Failed to capture {default} snapshot for validation: $($_.Exception.Message)"
@@ -282,7 +292,16 @@ Write-Output "Important note    : If the VM still boots, the effective boot entr
 
 if ($ScheduleReboot -eq "YES") {
     Write-Section "Scheduling reboot"
-    Invoke-Native -FilePath "shutdown.exe" -Arguments @("/r", "/f", "/t", "60", "/c", "Lab: trigger 0xC0000001 via Gen2 BCD missing device osdevice") -AllowFailure | Out-Null
+    $shutdownExitCode = Invoke-Native -FilePath "shutdown.exe" -Arguments @("/r", "/f", "/t", "10") -AllowFailure
+    if ($shutdownExitCode -ne 0) {
+        Write-Warning "shutdown.exe failed in RunCommand context (ExitCode=$shutdownExitCode). Falling back to Restart-Computer."
+        try {
+            Restart-Computer -Force
+        }
+        catch {
+            Write-Warning "Restart-Computer fallback also failed: $($_.Exception.Message)"
+        }
+    }
 }
 else {
     Write-Output ""
