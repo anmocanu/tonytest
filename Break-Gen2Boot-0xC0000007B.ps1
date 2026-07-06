@@ -1,263 +1,96 @@
 <#
-Break-Gen2Boot-0xC000007B.ps1
-
-Purpose:
-    Azure Generation 2 / UEFI Windows VM lab script targeting:
-        0xC000007B / STATUS_INVALID_IMAGE_FORMAT
-
-Scenario:
-    Gen2 VM only.
-    Best tested without Trusted Launch / Secure Boot first (Secure Boot will
-    reject the tampered winload.efi before the format error is surfaced).
-
-Strategy:
-    Corrupt winload.efi on the active EFI System Partition (or the Windows
-    system32 boot copy) so the UEFI boot manager loads the file but the
-    Windows Boot Manager rejects it as an invalid PE image:
-        - locate EFI winload.efi on the EFI System Partition
-        - back up the original
-        - overwrite with a zero-byte file (invalid PE header)
-        - keep BCD intact so the error is image-format, not path resolution
-
-Reason:
-    0xC000007B / STATUS_INVALID_IMAGE_FORMAT fires when the loader binary
-    exists and is referenced by BCD, but its PE headers are absent or
-    describe the wrong architecture.  Zeroing the file is the fastest
-    reliable way to produce this on a running system.
-
-Lab warning:
-    This intentionally makes the VM non-bootable.
-    Use only on disposable lab VMs.
+    Break-Gen2Boot-0xC0000001.ps1
+    Intentionally breaks next boot by changing winload path to an invalid file format.
+    Designed to trigger error code 0xC0000001 under Azure RunCommand context.
 #>
-
-param(
-    [string]$ScheduleReboot  = "YES",
-    [string]$AsyncDetonate   = "YES",
-    [int]$DelaySeconds       = 90
-)
 
 $ErrorActionPreference = "Stop"
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
+$root = "C:\ChaosBoot"
+$logPath = Join-Path $root "stage.log"
+$restorePath = Join-Path $root "Restore-Boot.ps1"
 
-function Write-Section {
-    param([Parameter(Mandatory=$true)][string]$Title)
-    Write-Output ""
-    Write-Output "============================================================"
-    Write-Output $Title
-    Write-Output "============================================================"
+# Create the staging directory
+New-Item -ItemType Directory -Path $root -Force | Out-Null
+
+function Log([string]$msg) {
+    $line = "$(Get-Date -Format s) $msg"
+    $line | Out-File -FilePath $logPath -Append -Encoding ascii
+    Write-Host $line
 }
 
-function Invoke-Native {
-    param(
-        [Parameter(Mandatory=$true)][string]$FilePath,
-        [Parameter(Mandatory=$true)][string[]]$Arguments,
-        [switch]$AllowFailure
-    )
+Log "Starting boot-break designed for 0xC0000001."
 
-    Write-Output ("[cmd] {0} {1}" -f $FilePath, ($Arguments -join " "))
+$stamp = Get-Date -Format "yyyyMMdd-HHmmss"
+$bcdBackup = Join-Path $root "bcd-backup-$stamp.bak"
 
-    $psi                       = New-Object System.Diagnostics.ProcessStartInfo
-    $psi.FileName              = $FilePath
-    $psi.UseShellExecute       = $false
-    $psi.RedirectStandardOutput= $true
-    $psi.RedirectStandardError = $true
-    $psi.CreateNoWindow        = $true
-    $psi.Arguments             = $Arguments -join " "
+# Export existing BCD backup
+& bcdedit.exe /export $bcdBackup
+if ($LASTEXITCODE -ne 0) { throw "bcdedit /export failed with code $LASTEXITCODE" }
+Log "BCD backup created: $bcdBackup"
 
-    $proc           = New-Object System.Diagnostics.Process
-    $proc.StartInfo = $psi
-    [void]$proc.Start()
-    $stdout = $proc.StandardOutput.ReadToEnd()
-    $stderr = $proc.StandardError.ReadToEnd()
-    $proc.WaitForExit()
-    $exitCode = $proc.ExitCode
+# Read BCD settings as a single string
+$currentText = (& bcdedit.exe /enum "{current}" /v | Out-String)
+Log "Current BCD before change:"
+$currentText -split "`r?`n" | ForEach-Object { Log "  $_" }
 
-    if ($stdout) { $stdout -split "`r?`n" | Where-Object { $_ -ne "" } | ForEach-Object { Write-Output $_ } }
-    if ($stderr) { $stderr -split "`r?`n" | Where-Object { $_ -ne "" } | ForEach-Object { Write-Output $_ } }
+# Extract active loader identifier GUID safely
+$m = [regex]::Match($currentText, "(?im)^\s*identifier\s+({[0-9a-fA-F-]{36}}|{current})\s*$")
+if (-not $m.Success) {
+    throw "Could not parse active loader identifier from bcdedit output."
+}
+$guid = $m.Groups[1].Value
+Log "Target loader identifier: $guid"
 
-    if (($exitCode -ne 0) -and (-not $AllowFailure)) {
-        throw "Command failed. File=$FilePath ExitCode=$exitCode Args=$($Arguments -join ' ')"
-    }
-    if (($exitCode -ne 0) -and $AllowFailure) {
-        Write-Warning "Command returned non-zero exit code but failure was allowed. ExitCode=$exitCode"
-    }
+# --- CORE FIX FOR 0xC0000001 ---
+# Create a dummy text file at the target path. Because the file physically exists, 
+# Boot Manager will find it (avoiding 0xc000000f) but fail execution due to invalid headers (triggering 0xC0000001).
+$fakeLoaderPath = "C:\Windows\System32\winload.efi.broken"
+"This text string replaces a valid PE-COFF executable structure." | Out-File -FilePath $fakeLoaderPath -Encoding ascii -Force
+Log "Dummy file generated at $fakeLoaderPath"
 
-    return $exitCode
+# Apply the broken path to active loader
+$out1 = & bcdedit.exe /set $guid path \Windows\System32\winload.efi.broken 2>&1
+$code1 = $LASTEXITCODE
+Log "Set path on $guid exit code: $code1"
+if ($out1) { $out1 | ForEach-Object { Log "  $_" } }
+if ($code1 -ne 0) { throw "Failed setting path on $guid" }
+
+# Apply the broken path to default entry as well
+$out2 = & bcdedit.exe /set "{default}" path \Windows\System32\winload.efi.broken 2>&1
+$code2 = $LASTEXITCODE
+Log "Set path on {default} exit code: $code2"
+if ($out2) { $out2 | ForEach-Object { Log "  $_" } }
+
+# Verify the changes persisted
+$verifyCurrent = (& bcdedit.exe /enum "{current}" /v | Out-String)
+$verifyDefault = (& bcdedit.exe /enum "{default}" /v | Out-String)
+Log "BCD current after change:"
+$verifyCurrent -split "`r?`n" | ForEach-Object { Log "  $_" }
+Log "BCD default after change:"
+$verifyDefault -split "`r?`n" | ForEach-Object { Log "  $_" }
+
+if (($verifyCurrent -notmatch "winload\.efi\.broken") -and ($verifyDefault -notmatch "winload\.efi\.broken")) {
+    throw "Verification failed: neither {current} nor {default} shows broken winload path."
 }
 
-function Find-WinloadEfi {
-    <#
-    Returns a list of candidate winload.efi paths to corrupt.
-    Priority:
-      1. EFI System Partition  \EFI\Microsoft\Boot\winload.efi
-      2. Windows system32 boot \Windows\System32\Boot\winload.efi  (fallback)
-    #>
-    $candidates = @()
+# Generate a local fallback script for manual restoration later
+$restoreScript = @"
+Write-Host "Restoring loader paths..."
+if (Test-Path "$fakeLoaderPath") { Remove-Item "$fakeLoaderPath" -Force }
+bcdedit.exe /set {current} path \Windows\System32\winload.efi
+bcdedit.exe /set {default} path \Windows\System32\winload.efi
+Write-Host "If needed, full restore:"
+Write-Host "bcdedit.exe /import $bcdBackup"
+"@
+$restoreScript | Out-File -FilePath $restorePath -Encoding ascii -Force
+Log "Restore script written: $restorePath"
 
-    # --- EFI System Partition ---
-    try {
-        # Use mountvol to find the EFI partition drive letter (if already mounted)
-        $volumes = & mountvol | Where-Object { $_ -match '^\s+\\\\\?\\Volume' }
-        foreach ($vol in $volumes) {
-            $letter = ($vol -replace '\\\\?\\Volume\{[^}]+\}\\','').Trim().TrimEnd('\')
-            if ($letter -match '^[A-Z]:$') {
-                $p = Join-Path $letter '\EFI\Microsoft\Boot\winload.efi'
-                if (Test-Path $p) { $candidates += $p }
-            }
-        }
+# --- DECOUPLED REBOOT ---
+# Launch a hidden background process that sleeps for 60 seconds.
+# This gives the Azure fabric ample time to receive the 'Stage complete' signal and process exit code 0.
+Log "Scheduling decoupled background reboot process (60-second delay)..."
+Start-Process powershell -WindowStyle Hidden -ArgumentList "-Command", "Start-Sleep -Seconds 60; & shutdown.exe /r /f /t 0"
 
-        # bcdedit gives us the actual EFI partition path for the boot manager
-        $bcdOut = & bcdedit.exe /enum '{fwbootmgr}' /v 2>&1 | Out-String
-        if ($bcdOut -match 'device\s+partition=(\w:)') {
-            $efiDrive = $Matches[1]
-            $p = Join-Path $efiDrive '\EFI\Microsoft\Boot\winload.efi'
-            if ((Test-Path $p) -and ($p -notin $candidates)) { $candidates += $p }
-        }
-    } catch {
-        Write-Warning "EFI partition scan failed: $($_.Exception.Message)"
-    }
-
-    # --- Windows\System32\Boot fallback ---
-    $sys32 = Join-Path $env:SystemRoot 'System32\Boot\winload.efi'
-    if ((Test-Path $sys32) -and ($sys32 -notin $candidates)) { $candidates += $sys32 }
-
-    return $candidates
-}
-
-# ---------------------------------------------------------------------------
-# Deferred / async detonation  (allows RunCommand to report success first)
-# ---------------------------------------------------------------------------
-
-if ($AsyncDetonate -eq "YES") {
-    Write-Section "Deferring disruptive operation"
-    Write-Output "Run mode         : deferred"
-    Write-Output "Delay (seconds)  : $DelaySeconds"
-    Write-Output "Schedule reboot  : $ScheduleReboot"
-
-    $selfPath = $PSCommandPath
-    if (-not $selfPath) { $selfPath = $MyInvocation.MyCommand.Path }
-
-    if (-not $selfPath -or -not (Test-Path $selfPath)) {
-        Write-Error "Could not resolve script path for deferred execution."
-        exit 21
-    }
-
-    $deferredLog = "C:\Windows\Temp\Break-Gen2Boot-0xC000007B-deferred.log"
-
-    try {
-        Start-Process -FilePath "powershell.exe" -WindowStyle Hidden -ArgumentList @(
-            "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $selfPath, 
-            "-ScheduleReboot", $ScheduleReboot, "-AsyncDetonate", "NO"
-        ) -RedirectStandardOutput $deferredLog -RedirectStandardError ($deferredLog + ".err") | Out-Null
-    } catch {
-        Write-Error "Failed to launch deferred worker process: $($_.Exception.Message)"
-        exit 22
-    }
-
-    Write-Output "Deferred worker launched successfully."
-    Write-Output "Worker log path  : $deferredLog"
-    Write-Output "Exiting now so RunCommand can complete before reboot/break."
-    exit 0
-}
-
-# ---------------------------------------------------------------------------
-# Main break logic
-# ---------------------------------------------------------------------------
-
-Write-Section "Gen2 Boot Break — 0xC000007B / STATUS_INVALID_IMAGE_FORMAT"
-Write-Output "Target     : 0xC000007B / STATUS_INVALID_IMAGE_FORMAT"
-Write-Output "Method     : overwrite winload.efi with a zero-byte (invalid PE) file"
-Write-Output "Scope      : EFI System Partition + System32\Boot fallback"
-Write-Output "Lab warning: this intentionally makes the VM non-bootable"
-
-# If called with AsyncDetonate=NO, apply the delay that was set in deferred launcher
-if ($AsyncDetonate -eq "NO" -and $DelaySeconds -gt 0) {
-    Write-Section "Applying scheduled delay"
-    Write-Output "Sleeping for $DelaySeconds seconds before mutation..."
-    Start-Sleep -Seconds $DelaySeconds
-}
-
-Write-Section "Locating winload.efi"
-$targets = Find-WinloadEfi
-
-if (-not $targets -or $targets.Count -eq 0) {
-    Write-Error "Could not locate winload.efi on any known path. Aborting."
-    exit 11
-}
-
-Write-Output "Found $($targets.Count) target(s):"
-$targets | ForEach-Object { Write-Output "  $_" }
-
-Write-Section "Backing up and corrupting winload.efi"
-$backupDir = "C:\Windows\Temp\winload-backup-0xC000007B"
-New-Item -ItemType Directory -Path $backupDir -Force | Out-Null
-
-$corrupted = @()
-foreach ($target in $targets) {
-    $fileName   = [System.IO.Path]::GetFileName($target)
-    $backupPath = Join-Path $backupDir ($fileName + "_" + (Get-Date -Format 'yyyyMMddHHmmss') + ".bak")
-    try {
-        Copy-Item -Path $target -Destination $backupPath -Force
-        Write-Output "Backed up : $target  ->  $backupPath"
-    } catch {
-        Write-Warning "Backup failed for '$target': $($_.Exception.Message). Skipping this target."
-        continue
-    }
-
-    try {
-        # Overwrite with a zero-byte file — invalid PE, causes STATUS_INVALID_IMAGE_FORMAT
-        [System.IO.File]::WriteAllBytes($target, [byte[]]@())
-        Write-Output "Corrupted : $target (zeroed)"
-        $corrupted += $target
-    } catch {
-        Write-Warning "Could not corrupt '$target': $($_.Exception.Message)"
-    }
-}
-
-if ($corrupted.Count -eq 0) {
-    Write-Error "No winload.efi files were successfully corrupted. Aborting."
-    exit 12
-}
-
-Write-Section "Validation"
-foreach ($target in $corrupted) {
-    $size = (Get-Item $target -Force).Length
-    Write-Output "$target  ->  size after corruption: $size bytes"
-    if ($size -eq 0) {
-        Write-Output "  [PASS] File is zero-byte (invalid PE header confirmed)."
-    } else {
-        Write-Warning "  [WARN] File is not zero-byte. Result may vary."
-    }
-}
-
-Write-Section "Expected result after reboot"
-Write-Output "Target boot error : 0xC000007B / STATUS_INVALID_IMAGE_FORMAT"
-Write-Output "Failure class     : Windows Boot Manager loaded winload.efi but its PE header is invalid"
-Write-Output "Important note    : Secure Boot must be DISABLED — Secure Boot will reject the modified"
-Write-Output "                    file with a different error before the format check runs."
-Write-Output "Recovery          : Restore from backup at $backupDir"
-
-if ($ScheduleReboot -eq "YES") {
-    Write-Section "Scheduling reboot"
-    try {
-        shutdown.exe /r /f /t 10
-        Write-Output "Reboot scheduled for 10 seconds."
-    } catch {
-        Write-Warning "shutdown.exe failed. Falling back to Restart-Computer."
-        try {
-            Restart-Computer -Force
-        } catch {
-            Write-Warning "Restart-Computer also failed: $($_.Exception.Message)"
-        }
-    }
-} else {
-    Write-Output ""
-    Write-Output "Reboot not scheduled because ScheduleReboot was not YES."
-}
-
-Write-Output ""
-Write-Output "Script completed."
+Log "Stage complete. Script exiting cleanly to hand off success state to Azure."
 exit 0
