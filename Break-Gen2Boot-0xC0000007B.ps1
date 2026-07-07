@@ -1,7 +1,7 @@
 <#
-    Break-Gen2Boot-0xC0000001.ps1
+    Break-Gen2Boot-0xC0000007B.ps1
     Intentionally breaks next boot by changing winload path to an invalid file format.
-    Designed to trigger error code 0xC0000001 under Azure RunCommand context.
+    Designed to trigger error code 0xC0000007B (INACCESSIBLE_BOOT_DEVICE) under Azure RunCommand context.
 #>
 
 $ErrorActionPreference = "Stop"
@@ -19,7 +19,7 @@ function Log([string]$msg) {
     Write-Host $line
 }
 
-Log "Starting boot-break designed for 0xC0000001."
+Log "Starting boot-break designed for 0xC0000007B (INACCESSIBLE_BOOT_DEVICE)."
 
 $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
 $bcdBackup = Join-Path $root "bcd-backup-$stamp.bak"
@@ -61,6 +61,7 @@ $out2 = & bcdedit.exe /set "{default}" path \Windows\System32\winload.efi.broken
 $code2 = $LASTEXITCODE
 Log "Set path on {default} exit code: $code2"
 if ($out2) { $out2 | ForEach-Object { Log "  $_" } }
+if ($code2 -ne 0) { throw "Failed setting path on {default}" }
 
 # Verify the changes persisted
 $verifyCurrent = (& bcdedit.exe /enum "{current}" /v | Out-String)
@@ -70,8 +71,8 @@ $verifyCurrent -split "`r?`n" | ForEach-Object { Log "  $_" }
 Log "BCD default after change:"
 $verifyDefault -split "`r?`n" | ForEach-Object { Log "  $_" }
 
-if (($verifyCurrent -notmatch "winload\.efi\.broken") -and ($verifyDefault -notmatch "winload\.efi\.broken")) {
-    throw "Verification failed: neither {current} nor {default} shows broken winload path."
+if (($verifyCurrent -notmatch "winload\.efi\.broken") -or ($verifyDefault -notmatch "winload\.efi\.broken")) {
+    throw "Verification failed: both {current} and {default} must have broken winload path. Current found: $(($verifyCurrent -match 'winload\.efi\.broken')), Default found: $(($verifyDefault -match 'winload\.efi\.broken'))"
 }
 
 # Generate a local fallback script for manual restoration later
